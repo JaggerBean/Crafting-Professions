@@ -197,10 +197,86 @@ const partialJob = refining.actorJobs(partial)[0];
 assert.ok(partialJob.goldDelivered);
 assert.equal(state.actorProfessions(partial).bountyhunter.readyNotified, 2);
 partial.rejectCreate = false;
+await assert.rejects(refining.deliverDueJobs(partial), /GM reconciliation/);
+assert.ok(refining.actorJobs(partial)[0].itemDeliveryStarted, "Generic creation errors remain indeterminate");
+assert.equal(partial.system.currency.gp, partialJob.gold);
+assert.equal(state.xpOf(partial, "bountyhunter"), 100);
+// Explicit GM reconciliation of this fixture: the rejected mock created nothing.
+await partial.update({ [`flags.${GP}.refiningJobs.${partialJob.id}.itemDeliveryStarted`]: false });
 await refining.deliverDueJobs(partial);
 assert.equal(partial.system.currency.gp, partialJob.gold);
 assert.equal(state.xpOf(partial, "bountyhunter"), 100);
 assert.equal(partial.items.filter(item => item.getFlag(GP, "deliveryJob") === partialJob.id).length, 1);
+
+// Creation may commit and be consumed before a rejected acknowledgement reaches the caller.
+const uncertain = actor();
+const uncertainJob = await refining.queueJob(uncertain, { name: "Uncertain reward", gold: 7, quantity: 1, ready: 0,
+  data: { name: "Uncertain reward", type: "consumable", system: {} } });
+const createUncertain = uncertain.createEmbeddedDocuments.bind(uncertain);
+let uncertainCreations = 0;
+uncertain.createEmbeddedDocuments = async (...args) => {
+  const created = await createUncertain(...args);
+  uncertainCreations++;
+  await created[0].delete();
+  throw new Error("injected lost creation acknowledgement");
+};
+await assert.rejects(refining.deliverDueJobs(uncertain), /lost creation acknowledgement/);
+assert.ok(refining.actorJobs(uncertain)[0].itemDeliveryStarted);
+await assert.rejects(refining.deliverDueJobs(uncertain), /GM reconciliation/);
+assert.equal(uncertainCreations, 1, "Indeterminate delivery must never automatically create again");
+assert.equal(uncertain.system.currency.gp, 7);
+assert.equal(uncertain.items.length, 0);
+assert.equal(refining.actorJobs(uncertain)[0].id, uncertainJob.id);
+
+// Rejected reward commits refund exact used gear; persisted commits never refund.
+settings.set(`${CP}.bountyContracts`, { list: [{ id: "gear-cost", tier: 1, town: "Audit town", target: "Audit quarry",
+  title: "Gear cost", type: "kill", days: 1, kill: { gold: 8, gear: [{ name: "Audit Gear", quantity: 2, mode: "used", reason: "Spent during the hunt" }] }, finds: [] }] });
+const gearRow = recipes.findRecipe("bountyhunter:contract.gear-cost:kill");
+settings.set(`${CP}.rules`, { timed: true });
+for (const quantity of [2, 4]) {
+  const owner = actor();
+  await owner.createEmbeddedDocuments("Item", [{ name: "Audit Gear", type: "loot", system: { quantity }, flags: { audit: { provenance: "original" } } }]);
+  owner.rejectUpdate = isQueueCommit;
+  successful();
+  await assert.rejects(craft.craft(owner, gearRow.id), /injected Actor/);
+  assert.equal(refining.inventoryCount(owner, "Audit Gear"), quantity);
+  assert.equal(owner.items[0].getFlag("audit", "provenance"), "original");
+  assert.equal(state.xpOf(owner, "bountyhunter"), 0);
+  assert.equal(refining.actorJobs(owner).length, 0);
+  owner.rejectUpdate = null;
+  successful();
+  await craft.craft(owner, gearRow.id);
+  assert.equal(refining.inventoryCount(owner, "Audit Gear"), quantity - 2);
+  assert.equal(state.xpOf(owner, "bountyhunter"), 5);
+}
+const committedGear = actor();
+await committedGear.createEmbeddedDocuments("Item", [{ name: "Audit Gear", type: "loot", system: { quantity: 4 } }]);
+const commitGear = committedGear.update.bind(committedGear);
+committedGear.update = async changes => {
+  const result = await commitGear(changes);
+  if (isQueueCommit(changes)) throw new Error("injected lost reward acknowledgement");
+  return result;
+};
+successful();
+await assert.rejects(craft.craft(committedGear, gearRow.id), /lost reward acknowledgement/);
+assert.equal(refining.inventoryCount(committedGear, "Audit Gear"), 2, "Persisted job/progression forbids a refund");
+assert.equal(state.xpOf(committedGear, "bountyhunter"), 5);
+assert.equal(refining.actorJobs(committedGear).length, 1);
+
+const changedGear = actor();
+await changedGear.createEmbeddedDocuments("Item", [{ name: "Audit Gear", type: "loot", system: { quantity: 4 } }]);
+const changeGear = changedGear.update.bind(changedGear);
+changedGear.update = async changes => {
+  if (isQueueCommit(changes)) {
+    changedGear.items[0].system.quantity = 1;
+    throw new Error("injected rejected reward and external gear change");
+  }
+  return changeGear(changes);
+};
+successful();
+await assert.rejects(craft.craft(changedGear, gearRow.id), /Gear rollback needs GM reconciliation/);
+assert.equal(refining.inventoryCount(changedGear, "Audit Gear"), 1, "Rollback must not overwrite another inventory change");
+settings.delete(`${CP}.bountyContracts`);
 
 // Persist the item receipt before removing a job, then consume or transfer the reward.
 for (const transfer of [false, true]) {
@@ -281,4 +357,4 @@ const beforeEdits = structuredClone(settings.get(`${GP}.recipeEdits`));
 await assert.rejects(refining.updateRecipe(brick.id, fields("Stone Brick", "Audit A")), /Recipe cycle/);
 assert.deepEqual(settings.get(`${GP}.recipeEdits`), beforeEdits);
 assert.equal(rolls.length, 0);
-console.log("PASS: audit transactions — atomic bounty progression/rewards, payment retries, durable receipts, interrupted-receipt recovery, carried-only non-consuming experiments, and edit-time recipe cycle rejection.");
+console.log("PASS: audit transactions — atomic bounty rewards, guarded gear rollback, indeterminate delivery fail-closed handling, durable receipts, carried-only experiments, and recipe cycle rejection.");
