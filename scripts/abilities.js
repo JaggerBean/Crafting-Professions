@@ -339,23 +339,23 @@ async function applyMealAbilityUnlocked(ability, diners) {
   const touched = [];
   const lines = [];
   try {
-  for (const snapshot of snapshots) {
-    const { diner } = snapshot;
-    touched.push(snapshot);
-    if (ability.effect === "emptyPot") {
-      const current = Number(diner.system?.attributes?.exhaustion) || 0;
-      if (current > 0) await diner.update({ "system.attributes.exhaustion": current - 1 });
-      lines.push(`${diner.name}: ${current > 0 ? `exhaustion ${current} → ${current - 1}` : "well fed (no exhaustion to remove)"}`);
-    } else {
-      const created = await diner.createEmbeddedDocuments("ActiveEffect", [{ name: "Hearth-fed", img: "icons/consumables/food/bowl-stew-brown.webp", changes: [],
-        duration: { seconds: 86400 }, description: "Advantage on one saving throw against disease, poison, or fatigue within 24 hours (apply when it comes up). Mundane food sickness or mild poison is cured; a magical one is suppressed.",
-        flags: { [MODULE_ID]: { hearthFed: true, mealAbilityTransaction: token } } }]);
-      if (created.length !== 1) throw new Error(`Could not create Hearth-fed for ${diner.name}.`);
-      // Preserve the previous effect until its replacement exists.
-      if (snapshot.effects.length) await diner.deleteEmbeddedDocuments("ActiveEffect", snapshot.effects.map(effect => effect.id));
-      lines.push(`${diner.name}: Hearth-fed for 24 hours`);
+    for (const snapshot of snapshots) {
+      const { diner } = snapshot;
+      touched.push(snapshot);
+      if (ability.effect === "emptyPot") {
+        const current = Number(diner.system?.attributes?.exhaustion) || 0;
+        if (current > 0) await diner.update({ "system.attributes.exhaustion": current - 1 });
+        lines.push(`${diner.name}: ${current > 0 ? `exhaustion ${current} → ${current - 1}` : "well fed (no exhaustion to remove)"}`);
+      } else {
+        const created = await diner.createEmbeddedDocuments("ActiveEffect", [{ name: "Hearth-fed", img: "icons/consumables/food/bowl-stew-brown.webp", changes: [],
+          duration: { seconds: 86400 }, description: "Advantage on one saving throw against disease, poison, or fatigue within 24 hours (apply when it comes up). Mundane food sickness or mild poison is cured; a magical one is suppressed.",
+          flags: { [MODULE_ID]: { hearthFed: true, mealAbilityTransaction: token } } }]);
+        if (created.length !== 1) throw new Error(`Could not create Hearth-fed for ${diner.name}.`);
+        // Preserve the previous effect until its replacement exists.
+        if (snapshot.effects.length) await diner.deleteEmbeddedDocuments("ActiveEffect", snapshot.effects.map(effect => effect.id));
+        lines.push(`${diner.name}: Hearth-fed for 24 hours`);
+      }
     }
-  }
   } catch (error) {
     const failures = [];
     for (const snapshot of touched.reverse()) {

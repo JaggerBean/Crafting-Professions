@@ -293,7 +293,7 @@ const request = (owner, diners, requestId) => ({ requestId, key: "cook", path: o
   const result = await abilities.useAbility(owner, "cook", { items: [owner, other] });
   assert.equal(result.success, true); assert.equal(rolls, before + 1);
   assert.equal(owner.effects.length, 1); assert.equal(other.effects.length, 1, "normal player feeds a cross-owner party");
-  assert.equal(owner.getFlag(scope, "professions.cook.abilityUsed"), undefined, "recovered operational failure restores readiness");
+  assert.equal(owner.getFlag(scope, "professions.cook.abilityUsed"), true);
   const sent = owner.getFlag(scope, "mealAbilityRequest");
   game.user = gm;
   await abilities.handleMealAbilityRequest(owner, sent, player);
@@ -366,7 +366,7 @@ const request = (owner, diners, requestId) => ({ requestId, key: "cook", path: o
   const before = rolls;
   await abilities.handleMealAbilityRequest(owner, data, player);
   assert.match(owner.getFlag(scope, "mealAbilityResponses.partialFailure.error"), /create failed/);
-  assert.equal(owner.getFlag(scope, "professions.cook.abilityUsed"), true);
+  assert.equal(owner.getFlag(scope, "professions.cook.abilityUsed"), undefined, "recovered operational failure restores readiness");
   assert.equal(owner.system.attributes.exhaustion, 2, "injected effect data ignored");
   await abilities.handleMealAbilityRequest(owner, data, player);
   assert.equal(rolls, before + 1, "failed request cannot repeat partial benefits");
