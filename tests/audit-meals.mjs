@@ -385,4 +385,137 @@ const request = (owner, diners, requestId) => ({ requestId, key: "cook", path: o
   await abilities.handleMealAbilityRequest(owner, data, player);
   assert.equal(rolls, before); assert.match(owner.getFlag(scope, `mealAbilityResponses.${data.requestId}.error`), /already started/);
 }
-console.log("PASS: audit-meals — serving recovery, save expiry, talents, pricing, authenticated party feeding, authority checks and replay protection");
+const hearthEffect = (name = "Previous Hearth-fed") => new Effect({ name, changes: [],
+  duration: { seconds: 321, startTime: 123 }, flags: { [scope]: { hearthFed: true, preserved: "original" } } });
+const effectState = doc => doc.effects.map(effect => effect.toObject());
+
+// A later diner fails after earlier replacements completed. Preserve exact
+// previous effects (IDs, duration, flags) and both actors' temporary HP.
+{
+  const owner = guardedActor(); const other = guardedActor(); other.isOwner = false;
+  owner.flags[scope].professions.cook.abilityUsed = false;
+  owner.effects.push(hearthEffect(), new Effect({ name: "Unrelated", flags: {} }));
+  other.effects.push(hearthEffect());
+  owner.system.attributes.hp.temp = 7; other.system.attributes.hp.temp = 3;
+  const beforeEffects = [effectState(owner), effectState(other)];
+  const create = owner.createEmbeddedDocuments;
+  owner.createEmbeddedDocuments = async (...args) => {
+    const created = await create.apply(owner, args);
+    if (args[1].some(effect => effect.flags?.[scope]?.mealAbilityTransaction)) owner.system.attributes.hp.temp = 99;
+    return created;
+  };
+  other.failCreate = true;
+  const data = request(owner, [owner, other], "laterDinerRollback");
+  await abilities.handleMealAbilityRequest(owner, data, player);
+  assert.match(owner.getFlag(scope, `mealAbilityResponses.${data.requestId}.error`), /All diners were restored/);
+  assert.deepEqual([effectState(owner), effectState(other)], beforeEffects);
+  assert.deepEqual([owner.system.attributes.hp.temp, other.system.attributes.hp.temp], [7, 3]);
+  assert.equal(owner.getFlag(scope, "professions.cook.abilityUsed"), false, "exact previous false restored");
+  const beforeRolls = rolls;
+  await abilities.handleMealAbilityRequest(owner, data, player);
+  assert.equal(rolls, beforeRolls, "recovered request ID still spent");
+  await abilities.handleMealAbilityRequest(owner, request(owner, [owner, other], "newAfterRecovery"), player);
+  assert.equal(owner.getFlag(scope, "professions.cook.abilityUsed"), true, "new request can use a recovered ability");
+}
+// Replacement creation fails before deleting the previous Hearth-fed.
+{
+  const owner = guardedActor(); const old = hearthEffect(); owner.effects.push(old);
+  owner.failCreate = true;
+  await assert.rejects(abilities.useAbility(owner, "cook", { items: [owner] }), /All diners were restored/);
+  assert.equal(owner.effects[0], old, "creation failure never deletes the previous effect");
+  assert.equal(owner.getFlag(scope, "professions.cook.abilityUsed"), undefined);
+}
+// A delete can succeed and then reject. Restore its removed effect too.
+{
+  const owner = guardedActor(); owner.effects.push(hearthEffect());
+  const previous = effectState(owner); owner.failDeleteEffects = true;
+  await assert.rejects(abilities.useAbility(owner, "cook", { items: [owner] }), /All diners were restored/);
+  assert.deepEqual(effectState(owner), previous);
+  assert.equal(owner.getFlag(scope, "professions.cook.abilityUsed"), undefined);
+}
+// Later Empty Pot write fails: restore exhaustion for every diner.
+{
+  const owner = guardedActor(); const other = guardedActor(); other.isOwner = false;
+  owner.flags[scope].professions.cook.path = "wanderer";
+  owner.system.attributes.hp.temp = 4; other.system.attributes.hp.temp = 8;
+  other.failUpdate = true;
+  const data = request(owner, [owner, other], "exhaustionRollback");
+  await abilities.handleMealAbilityRequest(owner, data, player);
+  assert.deepEqual([owner.system.attributes.exhaustion, other.system.attributes.exhaustion], [2, 2]);
+  assert.deepEqual([owner.system.attributes.hp.temp, other.system.attributes.hp.temp], [4, 8]);
+  assert.equal(owner.getFlag(scope, "professions.cook.abilityUsed"), undefined);
+  assert.match(owner.getFlag(scope, `mealAbilityResponses.${data.requestId}.error`), /All diners were restored/);
+}
+// A rejected write may have mutated both attributes before rejecting.
+{
+  const owner = guardedActor(); owner.flags[scope].professions.cook.path = "wanderer";
+  const update = owner.update;
+  let failed = false;
+  owner.update = async changes => {
+    await update.call(owner, changes);
+    if (!failed) { failed = true; owner.system.attributes.hp.temp = 55; throw new Error("after write failed"); }
+  };
+  await assert.rejects(abilities.useAbility(owner, "cook", { items: [owner] }), /All diners were restored/);
+  assert.equal(owner.system.attributes.exhaustion, 2); assert.equal(owner.system.attributes.hp.temp, 0);
+  assert.equal(owner.getFlag(scope, "professions.cook.abilityUsed"), undefined);
+}
+// Rollback failure retains the spent ability and blocks a new request. Other
+// diners still recover even when one target cannot be restored.
+{
+  const owner = guardedActor(); const other = guardedActor(); other.isOwner = false;
+  owner.effects.push(hearthEffect()); other.effects.push(hearthEffect());
+  const previousOther = effectState(other);
+  const remove = owner.deleteEmbeddedDocuments;
+  owner.deleteEmbeddedDocuments = async (type, ids) => {
+    if (ids.some(id => owner.effects.find(effect => effect.id === id)?.getFlag(scope, "mealAbilityTransaction"))) {
+      throw new Error("cannot remove new effect");
+    }
+    return remove.call(owner, type, ids);
+  };
+  other.failCreate = true;
+  const data = request(owner, [owner, other], "rollbackFailure");
+  await abilities.handleMealAbilityRequest(owner, data, player);
+  assert.equal(owner.getFlag(scope, "professions.cook.abilityUsed"), true);
+  assert.match(owner.getFlag(scope, `mealAbilityResponses.${data.requestId}.error`), /GM reconciliation required/);
+  assert.deepEqual(effectState(other), previousOther, "other diners recover despite one failed rollback");
+  const before = rolls;
+  await abilities.handleMealAbilityRequest(owner, data, player);
+  await abilities.handleMealAbilityRequest(owner, request(owner, [other], "afterFailedRecovery"), player);
+  assert.equal(rolls, before);
+}
+// Restoring readiness itself can fail: retain spent, report reconciliation.
+{
+  const owner = guardedActor(); owner.failCreate = true;
+  owner.unsetFlag = async () => { throw new Error("readiness write failed"); };
+  await assert.rejects(abilities.useAbility(owner, "cook", { items: [owner] }), /GM reconciliation required/);
+  assert.equal(owner.getFlag(scope, "professions.cook.abilityUsed"), true);
+  assert.equal(owner.effects.length, 0);
+}
+// A genuine failed check still spends the ability and writes no effects.
+{
+  const owner = guardedActor(); const check = game.modules.get("gathering-professions").api.recipes.rollProfessionCheck;
+  game.modules.get("gathering-professions").api.recipes.rollProfessionCheck = async () => ({ total: 1, toMessage: async () => {} });
+  try {
+    assert.equal((await abilities.useAbility(owner, "cook", { items: [owner] })).success, false);
+    assert.equal(owner.getFlag(scope, "professions.cook.abilityUsed"), true);
+    assert.equal(owner.effects.length, 0);
+  } finally { game.modules.get("gathering-professions").api.recipes.rollProfessionCheck = check; }
+}
+// Two cooks feeding each other in reversed diner order must not deadlock.
+{
+  const first = guardedActor(); const second = guardedActor();
+  first.flags[scope].professions.cook.path = "wanderer";
+  second.flags[scope].professions.cook.path = "wanderer";
+  const offset = lockEntries.length;
+  let timer;
+  try {
+    await Promise.race([
+      Promise.all([abilities.useAbility(first, "cook", { items: [first, second] }), abilities.useAbility(second, "cook", { items: [second, first] })]),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("party lock deadlock")), 1000); })
+    ]);
+  } finally { clearTimeout(timer); }
+  assert.equal(first.system.attributes.exhaustion, 0); assert.equal(second.system.attributes.exhaustion, 0);
+  const ordered = [first.id, second.id].sort();
+  assert.deepEqual(lockEntries.slice(offset), [...ordered, ...ordered], "each cook acquired once, in the same global order");
+}
+console.log("PASS: audit-meals — serving recovery, save expiry, talents, pricing, authenticated party feeding, replay protection, transactional party rollback and ordered actor locks");
