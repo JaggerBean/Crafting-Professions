@@ -1,5 +1,9 @@
 # Crafting Professions
 
+## Campaign pricing
+
+Crafted gear covers at least ingredient cost plus 25%; dishes cover at least ingredient cost plus 50% per serving. The most expensive enabled recipe sets the minimum, using final rounded ingredient prices. Existing higher prices and GM-approved floors are retained. Prices round upward to whole silver. Arrows and bolts are priced per piece, not by applying a bundle's book price to every piece. Gathering Professions supplies the shared pricing rules and approved-price flags.
+
 Crafting professions for **Gathering Professions** (Foundry VTT v14, dnd5e): **Blacksmith**, **Bounty Hunter** and **Cook**. Professions are written in the style of *Davi's Professions Document* (based on Ghostfire Gaming's Grim Hollow professions).
 
 Requires: Gathering Professions 0.30.1+. Recommended: Kris's Compendium of Trade Goods (`kctg-5e`) for hardware products. Weapons and gear come from the dnd5e **2024 Equipment** compendium.

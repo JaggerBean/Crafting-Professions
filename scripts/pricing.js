@@ -35,7 +35,8 @@ export async function craftingPrices(prices, { bookPrice, priceInGp, campaignPri
   const standard = new Set([...Object.values(CRAFTING_PROFESSIONS).map(profession => profession.tool?.name).filter(Boolean), ...gear, ...BOUGHT]);
   for (const name of standard) {
     if (outputs.has(name) || prices.has(name)) continue;
-    const value = await halfBook(name);
+    const item = byName(name);
+    const value = approvedPrice(item) ?? (item?.getFlag?.("gathering-professions", "campaignPrice") ? priceInGp(item.system?.price) : await halfBook(name));
     if (value !== null) out.set(name, value);
   }
   // Crafted goods, from ingredient costs.
@@ -67,7 +68,10 @@ export async function craftingPrices(prices, { bookPrice, priceInGp, campaignPri
     const basis = Number(byName(name).getFlag?.("gathering-professions", "campaignPrice")?.basis);
     (groups.get(tier) ?? groups.set(tier, []).get(tier)).push({ key: name, old: Number.isFinite(basis) ? basis : priceInGp(byName(name).system?.price) });
   }
-  for (const [tier, members] of groups) for (const [name, gp] of spreadInBand(members, RARE_BANDS[tier - 1])) out.set(name, gp);
+  for (const [tier, members] of groups) for (const [name, gp] of spreadInBand(members, RARE_BANDS[tier - 1])) {
+    const item = byName(name);
+    out.set(name, approvedPrice(item) ?? (item?.getFlag?.("gathering-professions", "campaignPrice") ? priceInGp(item.system?.price) : gp));
+  }
   // Recipe scrolls.
   for (const item of items) {
     const id = item.getFlag?.(MODULE_ID, "recipe");
