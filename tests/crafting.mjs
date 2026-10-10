@@ -228,6 +228,9 @@ settings.rules = {};
 // Experimenting: exact items (any amounts), warm and cold hints, nothing used.
 const handaxe = smithing.find(row => row.output === "Handaxe");
 assert.equal(state.knows(smith, handaxe.id), false);
+const missingExperiment = await craftLib.experiment(smith, "blacksmith", ["Cedar Plank"]);
+assert.deepEqual([missingExperiment.learned, missingExperiment.warm, missingExperiment.message], [null, false, "Carry the ingredients first: Cedar Plank."]);
+await smith.createEmbeddedDocuments("Item", [{ name: "Cedar Plank", type: "loot", system: { quantity: 1 } }, { name: "Nails", type: "loot", system: { quantity: 1 } }]);
 const warm = await craftLib.experiment(smith, "blacksmith", ["Cedar Plank"]);
 assert.deepEqual([warm.learned, warm.warm, warm.message], [null, true, "Something here could work…"]);
 const cold = await craftLib.experiment(smith, "blacksmith", ["Nails"]);

@@ -78,6 +78,7 @@ const rolls = [];
 const messages = [];
 globalThis.foundry = { utils: { getProperty: get, setProperty: set, randomID: () => `id${nextId++}`, escapeHTML: String } };
 globalThis.ui = { notifications: { info() {} } };
+globalThis.Hooks = { on() {}, once() {}, off() {} };
 globalThis.ChatMessage = { create: async data => messages.push(data), getSpeaker: () => ({}) };
 globalThis.Roll = class {
   constructor(formula) { this.formula = formula; }
