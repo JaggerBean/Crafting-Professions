@@ -157,7 +157,7 @@ export async function createRecipe(fields) {
   requireGM();
   const data = normalizeRecipeFields(fields);
   const row = { id: `${data.profession}:custom-${foundry.utils.randomID()}`, ...data };
-  assertAcyclicRecipes([...allRecipes(), row]);
+  assertAcyclicRecipes([...Object.keys(CRAFTING_PROFESSIONS).flatMap(key => professionRecipes(key)), row]);
   await game.settings.set(MODULE_ID, "customRecipes", [...customRecipes(), row]);
   await shareProduct(data.output);
   return row;
@@ -168,7 +168,7 @@ export async function updateRecipe(id, fields) {
   const current = findRecipe(id, { includeDisabled: true });
   if (!current) throw new Error("That recipe no longer exists.");
   const data = normalizeRecipeFields({ ...fields, profession: current.profession });
-  assertAcyclicRecipes(allRecipes().map(row => row.id === id ? { ...row, ...data } : row));
+  assertAcyclicRecipes(Object.keys(CRAFTING_PROFESSIONS).flatMap(key => professionRecipes(key)).map(row => row.id === id ? { ...row, ...data } : row));
   if (current.custom) await game.settings.set(MODULE_ID, "customRecipes", customRecipes().map(row => (row.id === id ? { ...row, ...data } : row)));
   else {
     const edits = recipeEdits();
