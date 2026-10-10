@@ -239,7 +239,7 @@ async function experimentUnlocked(actor, profession, names) {
   if (!hasProfession(actor, profession)) return { learned: null, warm: false, message: `Only a ${label} can experiment here.` };
   const chosen = [...new Set(names)];
   if (!chosen.length) return { learned: null, warm: false, message: "Put something in first." };
-  const missing = chosen.filter(name => gp().inventoryCount(actor, name) < 1);
+  const missing = chosen.filter(name => gp().inventoryCount(actor, name) <= 0);
   if (missing.length) return { learned: null, warm: false, message: `Carry the ingredients first: ${missing.join(", ")}.` };
   const known = knownIds(actor);
   const rank = rankOf(actor, profession);

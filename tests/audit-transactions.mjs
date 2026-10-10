@@ -230,11 +230,12 @@ assert.equal((await craft.experiment(smith, "blacksmith", ["Copper Ingot", "Cure
 await smith.createEmbeddedDocuments("Item", [{ name: "Copper Ingot", type: "loot", system: { quantity: 0 } },
   { name: "Cured Hide", type: "loot", system: { quantity: 1 } }]);
 assert.equal((await craft.experiment(smith, "blacksmith", ["Copper Ingot", "Cured Hide"])).learned, null);
-smith.items[0].system.quantity = 1;
+smith.items[0].system.quantity = 0.25;
 const before = smith.items.map(item => item.toObject());
 const discovery = await craft.experiment(smith, "blacksmith", ["Copper Ingot", "Cured Hide"]);
 assert.equal(discovery.learned.output, "Dagger");
 assert.deepEqual(smith.items.map(item => item.toObject()), before);
+smith.items[0].system.quantity = 1;
 await smith.createEmbeddedDocuments("Item", [{ name: "Cedar Plank", type: "loot", system: { quantity: 1 } }]);
 await state.learn(smith, recipes.professionRecipes("blacksmith").filter(entry => entry.output !== "Handaxe").map(entry => entry.id));
 const handaxe = await craft.experiment(smith, "blacksmith", ["Copper Ingot", "Cedar Plank"]);
