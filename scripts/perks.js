@@ -73,7 +73,11 @@ export function applyPerk(data, entry) {
   const set = (path, value) => foundry.utils.setProperty(data, path, value);
   const get = path => foundry.utils.getProperty(data, path);
   if (effects.weight && Number.isFinite(Number(get("system.weight.value")))) set("system.weight.value", Math.round(Number(get("system.weight.value")) * effects.weight * 100) / 100);
-  if (effects.value && Number.isFinite(Number(get("system.price.value")))) set("system.price.value", Math.round(Number(get("system.price.value")) * effects.value * 100) / 100);
+  if (effects.value && Number.isFinite(Number(get("system.price.value")))) {
+    const saved = get("flags.gathering-professions.campaignPrice") ?? {};
+    set("flags.gathering-professions.campaignPrice", { ...saved, baseName: saved.baseName ?? data.name.replace(/^Masterwork\s+/, ""), valueMultiplier: (Number(saved.valueMultiplier) || (get(`flags.${MODULE_ID}.masterwork`) ? 2 : 1)) * effects.value });
+    set("system.price.value", Math.round(Number(get("system.price.value")) * effects.value * 100) / 100);
+  }
   if (effects.damage && data.type === "weapon") {
     const current = String(get("system.damage.base.bonus") ?? "").trim();
     set("system.damage.base.bonus", current ? `${current} + ${effects.damage}` : String(effects.damage));
@@ -96,6 +100,8 @@ export function applyPerk(data, entry) {
 
 /** Make item data Masterwork (in place): name and value. */
 export function applyMasterwork(data, valueFactor = 2) {
+  const saved = foundry.utils.getProperty(data, "flags.gathering-professions.campaignPrice") ?? {};
+  foundry.utils.setProperty(data, "flags.gathering-professions.campaignPrice", { ...saved, baseName: saved.baseName ?? data.name, valueMultiplier: (Number(saved.valueMultiplier) || 1) * valueFactor });
   data.name = `Masterwork ${data.name}`;
   const price = Number(foundry.utils.getProperty(data, "system.price.value"));
   if (Number.isFinite(price)) foundry.utils.setProperty(data, "system.price.value", Math.round(price * valueFactor * 100) / 100);

@@ -132,8 +132,7 @@ async function useAbilityUnlocked(actor, key, { items = null, quarry = null } = 
   const chosen = ability.effect === "intel" ? [] : items ?? await (mealAbility ? chooseDiners(actor, ability) : chooseItems(actor, ability));
   if (ability.effect !== "intel" && !chosen?.length) return null;
   if (mealAbility) {
-    if (chosen.length > ability.maxItems) throw new Error(`${ability.name} feeds at most ${ability.maxItems}.`);
-    if (chosen.some(entry => entry?.documentName !== "Actor")) throw new Error("Choose characters to feed.");
+    validateDiners(ability, chosen);
   } else if (chosen.length > ability.maxItems || chosen.some(item => !workableItems(actor).includes(item))) throw new Error("Choose eligible items from this character's inventory.");
   if (ability.effect === "coldForge" && chosen.some(item => durabilityOf(item)?.value > 0)) throw new Error("Cold Forge only repairs broken tools.");
   const die = RANK_DIE[rankOf(actor, key) - 1];
@@ -163,24 +162,33 @@ async function useAbilityUnlocked(actor, key, { items = null, quarry = null } = 
 }
 
 const isPartyActor = entry => entry?.type === "character" && Boolean(entry.hasPlayerOwner);
+const canFeed = entry => game.user.isGM || entry?.isOwner;
+
+function validateDiners(ability, diners) {
+  if (!["hearthcraft", "emptyPot"].includes(ability?.effect)) throw new Error("Choose a cooking ability.");
+  if (!Array.isArray(diners) || !diners.length || diners.length > ability.maxItems) throw new Error(`${ability.name} feeds at most ${ability.maxItems}.`);
+  if (new Set(diners).size !== diners.length || diners.some(entry => entry?.documentName !== "Actor")) throw new Error("Choose distinct characters to feed.");
+  if (diners.some(entry => !canFeed(entry))) throw new Error("You may feed only characters you own. Ask the GM to serve the other party members.");
+}
 
 /** Ask which party characters eat (up to the ability's limit). */
 async function chooseDiners(actor, ability) {
-  const party = [...new Set([actor, ...Array.from(game.actors ?? []).filter(isPartyActor)])];
+  const party = [...new Set([actor, ...Array.from(game.actors ?? []).filter(isPartyActor)])].filter(canFeed);
   const DialogV2 = foundry.applications.api.DialogV2;
   const picked = await DialogV2.wait({
     window: { title: `${ability.name}: who eats?` }, classes: ["gathering-professions-ui", "gp-dialog"],
-    content: `<div class="cp-picklist">${party.map(entry => `<label class="cp-pick"><input type="checkbox" name="diner" value="${escape(entry.id)}" checked> <img src="${escape(entry.img)}" alt=""> ${escape(entry.name)}</label>`).join("")}</div><p class="hint">Up to ${ability.maxItems}.</p>`,
+    content: `<div class="cp-picklist">${party.map(entry => `<label class="cp-pick"><input type="checkbox" name="diner" value="${escape(entry.id)}" checked> <img src="${escape(entry.img)}" alt=""> ${escape(entry.name)}</label>`).join("")}</div><p class="hint">Up to ${ability.maxItems}. ${game.user.isGM ? "" : "Only characters you own are listed. Ask the GM to serve other party members."}</p>`,
     buttons: [{ action: "ok", label: "Serve", default: true, callback: (_event, button) => Array.from(button.form.querySelectorAll('input[name="diner"]:checked')).map(input => input.value) }],
     rejectClose: false
   });
   if (!picked) return null;
   if (picked.length > ability.maxItems) throw new Error(`${ability.name} feeds at most ${ability.maxItems}.`);
-  return picked.map(id => game.actors.get?.(id) ?? party.find(entry => entry.id === id)).filter(Boolean);
+  return picked.map(id => party.find(entry => entry.id === id)).filter(Boolean);
 }
 
 /** Hearthcraft: a 24-hour "Hearth-fed" effect. The Empty Pot: remove one level of exhaustion. */
 export async function applyMealAbility(ability, diners) {
+  validateDiners(ability, diners);
   const lines = [];
   for (const diner of diners) {
     if (ability.effect === "emptyPot") {
@@ -255,6 +263,10 @@ const checked = new WeakMap();
 /** Render hook for dnd5e's roll configuration dialogs: offer fitting talents. */
 export function injectTalents(app, element) {
   const config = app?.config ?? {};
+  // dnd5e 6.0.6 uses hookNames to distinguish ability checks from saves.
+  // Both dialogs carry config.ability; only check hooks may offer talents.
+  const names = (config.hookNames ?? []).map(name => String(name).toLowerCase());
+  if (!names.includes("abilitycheck") || names.some(name => ["savingthrow", "deathsave", "concentration"].includes(name))) return;
   const actor = config.subject;
   if (!actor || actor.documentName !== "Actor") return;
   const isPlain = !config.skill && !config.tool;

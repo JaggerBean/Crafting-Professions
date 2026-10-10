@@ -187,37 +187,97 @@ export function mealEffectData(meal, sourceName) {
     : meal.kind === "speed" ? [{ key: "system.attributes.movement.bonus", mode: 2, value: String(meal.amount) }] : [];
   return { name: `Meal: ${sourceName}`, img: "icons/consumables/food/bowl-stew-brown.webp", changes,
     duration: { seconds: (meal.minutes ?? 60) * 60 }, description: describeMeal(meal),
-    flags: { [MODULE_ID]: { meal: true } } };
+    flags: { [MODULE_ID]: { meal: true, ...(meal.kind === "advantage" ? { mealSave: meal.ability } : {}) } } };
 }
 
 /** Eat one serving: apply the effect to its owner (replacing any earlier meal effect). */
-export async function eatMeal(item) {
+export function eatMeal(item) {
+  return game.modules.get("gathering-professions").api.recipes.runActorAction(item?.parent, () => eatMealUnlocked(item));
+}
+
+async function eatMealUnlocked(item) {
   const actor = item?.parent;
+  const live = actor?.items?.get?.(item?.id) ?? Array.from(actor?.items ?? []).find(entry => entry.id === item?.id);
+  if (live !== item) throw new Error("That meal is no longer in this inventory. Reopen the inventory and try again.");
   const meal = mealOf(item);
   if (!meal) throw new Error("That isn't a meal.");
   if (!actor || actor.documentName !== "Actor") throw new Error("Put the meal in a character's inventory first.");
   if (!(game.user.isGM || actor.isOwner)) throw new Error("Only its owner can eat it.");
+  const quantity = Number(item.system?.quantity);
+  if (!Number.isInteger(quantity) || quantity < 1) throw new Error("That meal has no available servings.");
+  if (!MEAL_KINDS[meal.kind]) throw new Error("That meal has no valid effect.");
   const old = Array.from(actor.effects ?? []).filter(effect => effect.getFlag?.(MODULE_ID, "meal"));
-  if (old.length) await actor.deleteEmbeddedDocuments("ActiveEffect", old.map(effect => effect.id));
+  const snapshots = old.map(effect => effect.toObject());
+  const update = {};
+  const restore = {};
+  const change = (path, before, after) => { update[path] = after; restore[path] = before; };
   let result = describeMeal(meal);
   if (meal.kind === "tempHp") {
     const current = Number(actor.system?.attributes?.hp?.temp) || 0;
-    await actor.update({ "system.attributes.hp.temp": Math.max(current, meal.amount) });
+    change("system.attributes.hp.temp", current, Math.max(current, meal.amount));
   } else if (meal.kind === "heal") {
     const roll = await new Roll(meal.formula).evaluate();
     const hp = actor.system?.attributes?.hp ?? {};
     const value = Math.min(Number(hp.max) || Infinity, (Number(hp.value) || 0) + roll.total);
-    await actor.update({ "system.attributes.hp.value": value });
+    change("system.attributes.hp.value", Number(hp.value) || 0, value);
     result = `regains ${roll.total} hit points`;
   } else if (meal.kind === "exhaustion") {
     const current = Number(actor.system?.attributes?.exhaustion) || 0;
-    await actor.update({ "system.attributes.exhaustion": Math.max(0, current - meal.amount) });
-  } else if (meal.kind === "advantage" || meal.kind === "speed") {
-    await actor.createEmbeddedDocuments("ActiveEffect", [mealEffectData(meal, item.name)]);
+    change("system.attributes.exhaustion", current, Math.max(0, current - meal.amount));
   }
-  const quantity = Math.max(0, Number(item.system?.quantity) || 1);
-  if (quantity > 1) await item.update({ "system.quantity": quantity - 1 });
-  else await item.delete();
-  await ChatMessage.create({ speaker: ChatMessage.getSpeaker({ actor }), content: `<p><strong>${escape(actor.name)}</strong> eats ${escape(item.name)}: ${escape(result)}.</p>` });
+  // Reserve even the last serving before granting benefits. Keep the document
+  // until the benefit succeeds, so a failed operation can restore the serving.
+  await item.update({ "system.quantity": quantity - 1 });
+  const priorIds = new Set(Array.from(actor.effects ?? []).map(effect => effect.id));
+  try {
+    if (Object.keys(update).length) await actor.update(update);
+    else await actor.createEmbeddedDocuments("ActiveEffect", [mealEffectData(meal, item.name)]);
+    if (old.length) await actor.deleteEmbeddedDocuments("ActiveEffect", old.map(effect => effect.id));
+  } catch (error) {
+    try {
+      const added = Array.from(actor.effects ?? []).filter(effect => !priorIds.has(effect.id) && effect.getFlag?.(MODULE_ID, "meal"));
+      if (added.length) await actor.deleteEmbeddedDocuments("ActiveEffect", added.map(effect => effect.id));
+      if (Object.keys(restore).length) await actor.update(restore);
+      const missing = snapshots.filter((_, index) => !Array.from(actor.effects ?? []).some(effect => effect.id === old[index].id));
+      if (missing.length) await actor.createEmbeddedDocuments("ActiveEffect", missing, { keepId: true });
+      await item.update({ "system.quantity": quantity });
+    } catch (recoveryError) {
+      console.error(`${MODULE_ID}: meal recovery failed`, recoveryError);
+      throw new Error("Meal failed and recovery was incomplete. The serving remains reserved; ask the GM to reconcile it before retrying.");
+    }
+    throw error;
+  }
+  // Cleanup and chat failures must never refund an already granted benefit.
+  if (quantity === 1) await item.delete().catch(error => console.error(`${MODULE_ID}: could not remove empty meal`, error));
+  await ChatMessage.create({ speaker: ChatMessage.getSpeaker({ actor }), content: `<p><strong>${escape(actor.name)}</strong> eats ${escape(item.name)}: ${escape(result)}.</p>` })
+    .catch(error => console.error(`${MODULE_ID}: could not post meal`, error));
   return result;
 }
+
+// dnd5e 6.0.6 passes config to preRollSavingThrowV2, constructed rolls to
+// postSavingThrowRollConfiguration, and (rolls, { subject, ability }) after success.
+// Bind effect identities to this roll so an intervening meal is never removed.
+const pendingSaves = new WeakMap();
+const mealSaves = new WeakMap();
+const saveAbility = effect => effect.getFlag?.(MODULE_ID, "mealSave")
+  ?? effect.changes?.find(change => /^system\.abilities\.(str|dex|con|int|wis|cha)\.save\.roll\.mode$/.test(change.key))?.key.split(".")[2];
+
+Hooks.on("dnd5e.preRollSavingThrowV2", config => {
+  const actor = config.subject;
+  if (!actor || !(game.user.isGM || actor.isOwner)) return;
+  const effects = Array.from(actor.effects ?? []).filter(effect => effect.getFlag?.(MODULE_ID, "meal")
+    && !effect.disabled && !effect.isSuppressed && effect.duration?.remaining !== 0
+    && !(effect.duration?.remaining < 0) && saveAbility(effect) === config.ability);
+  pendingSaves.set(config, effects);
+});
+Hooks.on("dnd5e.postSavingThrowRollConfiguration", (rolls, config) => {
+  for (const roll of rolls ?? []) mealSaves.set(roll, pendingSaves.get(config) ?? []);
+});
+Hooks.on("dnd5e.rollSavingThrow", (rolls, { subject, ability }) => {
+  const effects = [...new Set((rolls ?? []).flatMap(roll => mealSaves.get(roll) ?? []))];
+  const ids = effects.filter(effect => saveAbility(effect) === ability && Array.from(subject.effects ?? []).includes(effect)).map(effect => effect.id);
+  if (ids.length && (game.user.isGM || subject.isOwner)) {
+    void subject.deleteEmbeddedDocuments("ActiveEffect", ids).catch(error => console.error(`${MODULE_ID}: could not expire meal save`, error));
+  }
+  for (const roll of rolls ?? []) mealSaves.delete(roll);
+});

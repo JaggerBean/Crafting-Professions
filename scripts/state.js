@@ -5,6 +5,7 @@
 import { MODULE_ID, CRAFTING_PROFESSIONS, RANK_DIE } from "./professions.js";
 import { craftingRules } from "./rules.js";
 import { starterIds } from "./recipes.js";
+import { runActorAction } from "../../gathering-professions/scripts/actions.js";
 
 export const actorProfessions = actor => ({ ...(actor?.getFlag?.(MODULE_ID, "professions") ?? {}) });
 export const hasProfession = (actor, key) => Boolean(actorProfessions(actor)[key]);
@@ -76,7 +77,11 @@ export async function markCompleted(actor, jobId) {
 }
 
 /** Teach recipe ids to a character (the owner or GM). Returns the new ids. */
-export async function learn(actor, ids) {
+export function learn(actor, ids, { locked = false } = {}) {
+  return locked ? learnUnlocked(actor, ids) : runActorAction(actor, () => learnUnlocked(actor, ids));
+}
+
+async function learnUnlocked(actor, ids) {
   if (!actor || !(game.user.isGM || actor.isOwner)) throw new Error("Choose a character you own.");
   const current = actor.getFlag(MODULE_ID, "known") ?? [];
   const fresh = [...new Set(ids)].filter(id => !current.includes(id));
@@ -98,7 +103,11 @@ export async function forget(actor, id, rules = craftingRules()) {
  * Take up a crafting profession (rank 1, starter recipes). Players may choose
  * one if they have none; the GM may add any.
  */
-export async function chooseProfession(actor, key, { path = "standard" } = {}) {
+export function chooseProfession(actor, key, { path = "standard" } = {}) {
+  return runActorAction(actor, () => chooseProfessionUnlocked(actor, key, { path }));
+}
+
+async function chooseProfessionUnlocked(actor, key, { path }) {
   if (!CRAFTING_PROFESSIONS[key]) throw new Error("Choose a crafting profession.");
   if (!actor || !(game.user.isGM || actor.isOwner)) throw new Error("Choose a character you own.");
   const current = actorProfessions(actor);
@@ -108,7 +117,7 @@ export async function chooseProfession(actor, key, { path = "standard" } = {}) {
   const retired = actor.getFlag(MODULE_ID, "retired")?.[key];
   await actor.setFlag(MODULE_ID, "professions", { ...current, [key]: retired ? structuredClone(retired) : { xp: 0, rank: 1, path, talents: [] } });
   if (retired) await actor.unsetFlag(MODULE_ID, `retired.${key}`);
-  await learn(actor, starterIds(key));
+  await learnUnlocked(actor, starterIds(key));
 }
 
 /** GM: remove a crafting profession (XP and known recipes are kept in case it returns). */
@@ -185,7 +194,11 @@ export async function setPath(actor, key, path) {
 }
 
 /** Pick a talent (owner, while a slot is free; the GM anytime). */
-export async function chooseTalent(actor, key, talentId) {
+export function chooseTalent(actor, key, talentId) {
+  return runActorAction(actor, () => chooseTalentUnlocked(actor, key, talentId));
+}
+
+async function chooseTalentUnlocked(actor, key, talentId) {
   if (!actor || !(game.user.isGM || actor.isOwner)) throw new Error("Choose a character you own.");
   const entry = CRAFTING_PROFESSIONS[key]?.talents?.find(row => row.id === talentId);
   if (!entry) throw new Error("Choose a talent.");
