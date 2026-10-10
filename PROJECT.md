@@ -2,13 +2,13 @@
 
 Companion module to **Gathering Professions** (`gathering-professions`). Adds crafting professions in the style of *Davi's Professions Document* (based on Ghostfire Gaming's Grim Hollow professions), with recipes run by the shared Gathering Professions engine and Recipes window.
 
-Status: Blacksmith and Bounty Hunter implemented. Crafting Professions 0.4.1 requires Gathering Professions 0.30.0. The 2026-10-09 deep-review fixes pass local regression tests; live UI and multiple-client verification remain pending (see CONTEXT.md). Historical design notes below are retained, but do not override current implementation or manifests.
+Status: Blacksmith, Bounty Hunter, and Cook implemented. Crafting Professions 0.8.0 requires Gathering Professions 0.33.0. Reliability fixes include serialized character choices, atomic bounty progression/reward records, durable delivery receipts, meal-serving transactions, authenticated GM-mediated party abilities, and quality-aware pricing. Live UI and multiple-client verification remain pending (see CONTEXT.md). Historical design notes below are retained, but do not override current implementation or manifests.
 
 **Change 2026-10-09:** the user dislikes Mastercrafted's UI. Refining now uses Gathering Professions' own engine and **Recipes window** (party-wide discovery, products grouped, batch crafting, timed jobs). Crafting professions should plug into that same engine and window (new tabs such as Blacksmith), not Mastercrafted. The Mastercrafted notes below are kept for reference only. First profession: **Blacksmith**.
 
 ## Dependencies
 
-- Foundry v14, dnd5e, Gathering Professions 0.30.0+ (required), Kris's Compendium of Trade Goods `kctg-5e` (recommended, for preset recipes). Mastercrafted is not required.
+- Foundry v14, dnd5e, Gathering Professions 0.33.0+ (required), Kris's Compendium of Trade Goods `kctg-5e` (recommended, for preset recipes). Mastercrafted is not required.
 - Reuses Gathering Professions' rank/die/XP engine, GM hub styling, and skill-tree link.
 - Shared recipe helpers include runActorAction (active-GM-granted, renewable character leases) and rollProfessionCheck (native dnd5e roll APIs). Reward jobs persist until component receipts confirm delivery. An active GM is required for player actions. The lease coordinates module actions, not arbitrary edits from other integrations.
 
