@@ -17,6 +17,7 @@ import { perkList, savePerks, applyPerk, applyMasterwork } from "./perks.js";
 import { craftingProvider } from "./provider.js";
 import { registerMenu } from "./menu.js";
 import { openGmWindow, HUB_SECTION } from "./gm.js";
+import { craftingPrices } from "./pricing.js";
 
 // Bump when products change: the GM prepares items again on the next load.
 const ITEMS_VERSION = 4;
@@ -39,6 +40,8 @@ function setUp(gpApi) {
   if (ready || !gpApi?.recipes) return;
   ready = true;
   for (const key of Object.keys(CRAFTING_PROFESSIONS)) gpApi.recipes.register(craftingProvider(key, gpApi.recipes));
+  // Campaign prices for crafted goods, bounty gear and finds, recipe scrolls.
+  gpApi.pricing?.registerContributor?.(craftingPrices);
   registerMenu(gpApi);
   registerAskAround(isActiveGM);
   void gpApi.hub?.registerSection(HUB_SECTION);

@@ -340,7 +340,8 @@ async function huntUnlocked(actor, row) {
 /* Recipe and contact scrolls                                              */
 /* ---------------------------------------------------------------------- */
 
-export const SCROLL_PRICE = Object.freeze([10, 25, 100, 500, 2500]);
+export { SCROLL_PRICE } from "./pricing.js";
+import { SCROLL_PRICE } from "./pricing.js";
 const SCROLL_ICON = "icons/sundries/scrolls/scroll-bound-brown-tan.webp";
 const CONTACT_ICON = "icons/sundries/documents/document-letter-blue.webp";
 

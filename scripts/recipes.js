@@ -267,6 +267,8 @@ export async function prepareItems() {
     if (!item) { report.missing.push(name); continue; }
     if ((item.ownership?.default ?? 0) < observer) { await item.update({ "ownership.default": observer }); report.shared++; }
   }
+  // Campaign prices for what was just imported (Gathering Professions' repricer).
+  try { await game.modules.get("gathering-professions")?.api?.pricing?.reprice?.(); } catch (error) { console.warn("crafting-professions: repricing after preparing items failed", error); }
   return report;
 }
 
