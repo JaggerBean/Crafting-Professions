@@ -10,7 +10,7 @@ const setProperty = (object, path, value) => {
 };
 const hooks = new Map();
 globalThis.Hooks = { on: (name, callback) => hooks.set(name, callback) };
-globalThis.foundry = { utils: { getProperty, setProperty } };
+globalThis.foundry = { utils: { getProperty, setProperty, randomID: () => `request${++id}` } };
 let messages = 0;
 globalThis.ChatMessage = { getSpeaker: () => ({}), create: async () => { messages++; } };
 globalThis.Roll = class {
@@ -27,7 +27,7 @@ const runActorAction = (actor, task) => {
 };
 let rolls = 0;
 globalThis.game = {
-  user: { isGM: true }, actors: [], settings: { get: () => undefined },
+  user: { id: "gm", isGM: true }, users: [], actors: [], settings: { get: () => undefined },
   modules: new Map([["gathering-professions", { api: { recipes: {
     runActorAction, rollProfessionCheck: async () => { rolls++; return { total: 20, toMessage: async () => {} }; }
   } } }]])
@@ -39,11 +39,13 @@ class Effect {
   toObject() { return { ...structuredClone(this), _id: this.id }; }
 }
 function actor() {
-  return {
+  const doc = {
+    id: `actor${++id}`, owners: ["player"],
     documentName: "Actor", name: "Cook", isOwner: true, type: "character", hasPlayerOwner: true,
     flags: { [scope]: { professions: { cook: { rank: 1, path: "standard", talents: [] } } } },
     items: [], effects: [], system: { attributes: { hp: { value: 5, max: 20, temp: 0 }, exhaustion: 2 } },
     getFlag(module, key) { return getProperty(this.flags[module], key); },
+    testUserPermission(user, level) { assert.equal(level, "OWNER"); return user.isGM || this.owners.includes(user.id); },
     async setFlag(module, key, value) { setProperty(this.flags[module], key, value); },
     async update(changes) {
       if (this.failUpdate) { this.failUpdate = false; throw new Error("benefit failed"); }
@@ -60,6 +62,8 @@ function actor() {
       if (this.failDeleteEffects) { this.failDeleteEffects = false; throw new Error("delete failed"); }
     }
   };
+  game.actors.push(doc);
+  return doc;
 }
 function item(owner, meal, quantity = 1) {
   const doc = {
@@ -193,7 +197,7 @@ function finishSave(owner, ability, rolls) {
   const owner = actor(); const other = actor(); other.isOwner = false;
   game.user.isGM = false;
   const before = rolls;
-  await assert.rejects(abilities.useAbility(owner, "cook", { items: [owner, other] }), /only characters you own/);
+  await assert.rejects(abilities.useAbility(owner, "cook", { items: [owner, other] }), /active GM is required/);
   assert.equal(rolls, before); assert.equal(owner.getFlag(scope, "professions.cook.abilityUsed"), undefined);
   await assert.rejects(abilities.applyMealAbility({ effect: "emptyPot", maxItems: 6 }, [owner, other]), /only characters you own/);
   assert.equal(owner.system.attributes.exhaustion, 2);
@@ -225,4 +229,106 @@ for (const name of ["SavingThrow", "deathSave", "concentration", "attack", "d20T
     { valueMultiplier: 4.5, source: "approved", approvedValue: 3, baseName: "Tea" });
 }
 assert.ok(messages > 0);
-console.log("audit-meals: serving races, rollback, matching save expiry, permissions, talent gates, pricing metadata passed");
+
+// Two-client transport double: only the GM handles authenticated actor updates.
+// Private User receipts survive actor-flag tampering and a change of active GM.
+const makeUser = (id, isGM) => ({
+  id, isGM, active: true, flags: {},
+  getFlag(module, key) { return getProperty(this.flags[module], key); },
+  async setFlag(module, key, value) {
+    assert.equal(game.user.id, this.id, "only authority writes its private receipts");
+    assert.ok(game.user.isGM);
+    this.flags[module] ??= {}; setProperty(this.flags[module], key, structuredClone(value));
+  }
+});
+const gm = makeUser("gm", true);
+const player = makeUser("player", false);
+const intruder = makeUser("intruder", false);
+game.users = [gm, player, intruder]; game.users.activeGM = gm;
+game.user = gm;
+abilities.registerAbilityHooks();
+const updateHook = hooks.get("updateActor");
+abilities.registerAbilityHooks(); assert.equal(hooks.get("updateActor"), updateHook, "registration idempotent");
+
+function guardedActor() {
+  const doc = actor();
+  const update = doc.update; const create = doc.createEmbeddedDocuments; const remove = doc.deleteEmbeddedDocuments;
+  doc.update = async changes => { assert.ok(game.user.isGM || doc.isOwner, "no cross-owner player writes"); return update.call(doc, changes); };
+  doc.createEmbeddedDocuments = async (...args) => { assert.ok(game.user.isGM || doc.isOwner, "no cross-owner player effects"); return create.apply(doc, args); };
+  doc.deleteEmbeddedDocuments = async (...args) => { assert.ok(game.user.isGM || doc.isOwner); return remove.apply(doc, args); };
+  return doc;
+}
+function connectTransport(doc) {
+  const setFlag = doc.setFlag;
+  doc.setFlag = async (module, key, value) => {
+    await setFlag.call(doc, module, key, structuredClone(value));
+    if (module !== scope || key !== "mealAbilityRequest" || game.user.isGM) return;
+    const sender = game.user;
+    game.user = game.users.activeGM;
+    try {
+      updateHook(doc, { [`flags.${scope}.mealAbilityRequest`]: value }, {}, sender.id);
+      await queues.get(doc);
+    } finally { game.user = sender; }
+  };
+}
+const request = (owner, diners, requestId) => ({ requestId, key: "cook", path: owner.getFlag(scope, "professions.cook.path"), diners: diners.map(doc => doc.id) });
+{
+  const owner = guardedActor(); const other = guardedActor(); other.isOwner = false; other.owners = ["otherplayer"];
+  connectTransport(owner); game.user = player;
+  const before = rolls;
+  const result = await abilities.useAbility(owner, "cook", { items: [owner, other] });
+  assert.equal(result.success, true); assert.equal(rolls, before + 1);
+  assert.equal(owner.effects.length, 1); assert.equal(other.effects.length, 1, "normal player feeds a cross-owner party");
+  assert.equal(owner.getFlag(scope, "professions.cook.abilityUsed"), true);
+  const sent = owner.getFlag(scope, "mealAbilityRequest");
+  game.user = gm;
+  await abilities.handleMealAbilityRequest(owner, sent, player);
+  assert.equal(rolls, before + 1, "replay cannot reroll");
+  owner.flags[scope].mealAbilityResponses = {};
+  owner.flags[scope].professions.cook.abilityUsed = false;
+  const replay = await abilities.handleMealAbilityRequest(owner, { ...sent, diners: [owner.id], effect: "emptyPot", dc: -100 }, player);
+  assert.equal(replay.success, true); assert.equal(rolls, before + 1, "actor flag tampering and rest never reuse ID");
+  const gm2 = makeUser("gm2", true); game.users.push(gm2); game.users.activeGM = gm2; game.user = gm2;
+  await abilities.handleMealAbilityRequest(owner, sent, player);
+  assert.equal(rolls, before + 1, "new active GM reads earlier authority receipts");
+  game.users.activeGM = gm; game.user = gm;
+}
+{
+  const owner = guardedActor(); const other = guardedActor(); other.isOwner = false;
+  const before = rolls;
+  const data = request(owner, [other], "unauthorized");
+  assert.equal(await abilities.handleMealAbilityRequest(owner, { ...data, sender: player.id }, intruder), null);
+  updateHook(owner, { flags: { [scope]: { mealAbilityRequest: data } } }, {}, intruder.id);
+  await Promise.resolve();
+  assert.equal(rolls, before); assert.equal(other.effects.length, 0);
+  game.user = player;
+  assert.equal(await abilities.handleMealAbilityRequest(owner, data, player), null, "players cannot execute GM handler");
+  game.user = gm;
+  const backup = makeUser("backup", true); game.users.push(backup); game.user = backup;
+  assert.equal(await abilities.handleMealAbilityRequest(owner, data, player), null, "inactive GM cannot execute");
+  game.user = gm;
+}
+{
+  const owner = guardedActor(); const other = guardedActor(); other.isOwner = false;
+  owner.flags[scope].professions.cook.path = "wanderer";
+  const data = request(owner, [owner, other], "concurrent");
+  const before = rolls;
+  await Promise.all([abilities.handleMealAbilityRequest(owner, data, player), abilities.handleMealAbilityRequest(owner, data, player)]);
+  assert.equal(rolls, before + 1); assert.equal(other.system.attributes.exhaustion, 1, "Empty Pot applies exactly once");
+  assert.equal(owner.system.attributes.exhaustion, 1);
+}
+{
+  const owner = guardedActor(); const outsider = guardedActor(); outsider.hasPlayerOwner = false;
+  const before = rolls;
+  await abilities.handleMealAbilityRequest(owner, request(owner, [outsider], "notparty"), player);
+  assert.match(owner.getFlag(scope, "mealAbilityResponses.notparty.error"), /party characters/);
+  assert.equal(rolls, before); assert.equal(outsider.effects.length, 0);
+  const changed = request(owner, [owner], "stalePath"); owner.flags[scope].professions.cook.path = "wanderer";
+  await abilities.handleMealAbilityRequest(owner, changed, player);
+  assert.match(owner.getFlag(scope, "mealAbilityResponses.stalePath.error"), /changed/);
+  assert.equal(rolls, before);
+  const duplicate = request(owner, [owner, owner], "duplicate");
+  assert.equal(await abilities.handleMealAbilityRequest(owner, duplicate, player), null);
+  assert.equal(await abilities.handleMealAbilityRequest(owner, { ...changed, requestId: "bad.id" }, player), null);
+}
+console.log("audit-meals: serving recovery, save expiry, talents, pricing, authenticated party feeding, authority checks and replay protection passed");
