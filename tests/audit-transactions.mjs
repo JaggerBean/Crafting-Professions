@@ -79,6 +79,7 @@ const messages = [];
 globalThis.foundry = { utils: { getProperty: get, setProperty: set, randomID: () => `id${nextId++}`, escapeHTML: String } };
 globalThis.ui = { notifications: { info() {} } };
 globalThis.Hooks = { on() {}, once() {}, off() {} };
+globalThis.CONST = { DOCUMENT_OWNERSHIP_LEVELS: { OBSERVER: 2 } };
 globalThis.ChatMessage = { create: async data => messages.push(data), getSpeaker: () => ({}) };
 globalThis.Roll = class {
   constructor(formula) { this.formula = formula; }
@@ -239,5 +240,25 @@ await state.learn(smith, recipes.professionRecipes("blacksmith").filter(entry =>
 const handaxe = await craft.experiment(smith, "blacksmith", ["Copper Ingot", "Cedar Plank"]);
 assert.equal(handaxe.learned.output, "Handaxe", "One ingot suffices to experiment with a two-ingot recipe");
 assert.equal(refining.inventoryCount(smith, "Copper Ingot"), 1);
+
+// Reject complete proposed graphs before saving either custom rows or built-in edits.
+game.modules.set("kctg-5e", { active: true });
+for (const name of ["Audit Raw", "Audit A", "Audit B", "Audit C", "Stone Brick"]) {
+  worldItems.push(new Document({ name, type: "loot", ownership: { default: 2 }, system: { quantity: 1 } }));
+}
+const fields = (output, input) => ({ profession: "mining", tier: 1, output, quantity: 1, inputs: [[input, 1]] });
+const first = await refining.createRecipe(fields("Audit A", "Audit Raw"));
+await refining.createRecipe(fields("Audit B", "Audit A"));
+await refining.createRecipe(fields("Audit C", "Audit B"));
+const beforeCreate = structuredClone(settings.get(`${GP}.customRecipes`));
+await assert.rejects(refining.createRecipe(fields("Audit A", "Audit C")), /Recipe cycle/);
+assert.deepEqual(settings.get(`${GP}.customRecipes`), beforeCreate);
+await assert.rejects(refining.updateRecipe(first.id, fields("Audit A", "Audit C")), /Recipe cycle/);
+assert.deepEqual(settings.get(`${GP}.customRecipes`), beforeCreate);
+await refining.createRecipe(fields("Audit A", "Stone Brick"));
+const brick = refining.refiningRecipes("mining").find(entry => !entry.custom && entry.output === "Stone Brick");
+const beforeEdits = structuredClone(settings.get(`${GP}.recipeEdits`));
+await assert.rejects(refining.updateRecipe(brick.id, fields("Stone Brick", "Audit A")), /Recipe cycle/);
+assert.deepEqual(settings.get(`${GP}.recipeEdits`), beforeEdits);
 assert.equal(rolls.length, 0);
-console.log("PASS: audit transactions — atomic bounty progression/rewards, payment retries, durable receipts, interrupted-receipt recovery, and carried-only non-consuming experiments.");
+console.log("PASS: audit transactions — atomic bounty progression/rewards, payment retries, durable receipts, interrupted-receipt recovery, carried-only non-consuming experiments, and edit-time recipe cycle rejection.");
