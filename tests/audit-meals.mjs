@@ -20,8 +20,12 @@ globalThis.Roll = class {
 };
 // Same actor serialization contract as Gathering Professions, without remote timers.
 const queues = new Map();
+const lockEntries = [];
 const runActorAction = (actor, task) => {
-  const next = (queues.get(actor) ?? Promise.resolve()).catch(() => {}).then(task);
+  const next = (queues.get(actor) ?? Promise.resolve()).catch(() => {}).then(async () => {
+    lockEntries.push(actor.id);
+    return task();
+  });
   queues.set(actor, next);
   return next;
 };
@@ -47,6 +51,11 @@ function actor() {
     getFlag(module, key) { return getProperty(this.flags[module], key); },
     testUserPermission(user, level) { assert.equal(level, "OWNER"); return user.isGM || this.owners.includes(user.id); },
     async setFlag(module, key, value) { setProperty(this.flags[module], key, value); },
+    async unsetFlag(module, key) {
+      const keys = key.split("."); const last = keys.pop();
+      const parent = keys.reduce((value, part) => value?.[part], this.flags[module]);
+      if (parent) delete parent[last];
+    },
     async update(changes) {
       if (this.failUpdate) { this.failUpdate = false; throw new Error("benefit failed"); }
       for (const [key, value] of Object.entries(changes)) setProperty(this, key, value);
@@ -267,7 +276,12 @@ function connectTransport(doc) {
     game.user = game.users.activeGM;
     try {
       updateHook(doc, { [`flags.${scope}.mealAbilityRequest`]: value }, {}, sender.id);
-      await queues.get(doc);
+      // All diner locks may precede the cook's lock. Wait for the hook's
+      // receipt, not whichever actor queue happened to exist on entry.
+      for (let tick = 0; tick < 100 && !doc.getFlag(scope, `mealAbilityResponses.${value.requestId}`); tick++) {
+        await new Promise(resolve => setImmediate(resolve));
+      }
+      assert.ok(doc.getFlag(scope, `mealAbilityResponses.${value.requestId}`), "GM hook produced its receipt");
     } finally { game.user = sender; }
   };
 }
@@ -279,7 +293,7 @@ const request = (owner, diners, requestId) => ({ requestId, key: "cook", path: o
   const result = await abilities.useAbility(owner, "cook", { items: [owner, other] });
   assert.equal(result.success, true); assert.equal(rolls, before + 1);
   assert.equal(owner.effects.length, 1); assert.equal(other.effects.length, 1, "normal player feeds a cross-owner party");
-  assert.equal(owner.getFlag(scope, "professions.cook.abilityUsed"), true);
+  assert.equal(owner.getFlag(scope, "professions.cook.abilityUsed"), undefined, "recovered operational failure restores readiness");
   const sent = owner.getFlag(scope, "mealAbilityRequest");
   game.user = gm;
   await abilities.handleMealAbilityRequest(owner, sent, player);
@@ -356,7 +370,7 @@ const request = (owner, diners, requestId) => ({ requestId, key: "cook", path: o
   assert.equal(owner.system.attributes.exhaustion, 2, "injected effect data ignored");
   await abilities.handleMealAbilityRequest(owner, data, player);
   assert.equal(rolls, before + 1, "failed request cannot repeat partial benefits");
-  assert.equal(owner.effects.length, 1); assert.equal(other.effects.length, 0);
+  assert.equal(owner.effects.length, 0); assert.equal(other.effects.length, 0);
 }
 {
   const owner = guardedActor(); const other = guardedActor(); other.isOwner = false;
@@ -371,4 +385,4 @@ const request = (owner, diners, requestId) => ({ requestId, key: "cook", path: o
   await abilities.handleMealAbilityRequest(owner, data, player);
   assert.equal(rolls, before); assert.match(owner.getFlag(scope, `mealAbilityResponses.${data.requestId}.error`), /already started/);
 }
-console.log("audit-meals: serving recovery, save expiry, talents, pricing, authenticated party feeding, authority checks and replay protection passed");
+console.log("PASS: audit-meals — serving recovery, save expiry, talents, pricing, authenticated party feeding, authority checks and replay protection");
