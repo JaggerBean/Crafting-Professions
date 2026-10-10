@@ -387,7 +387,7 @@ const request = (owner, diners, requestId) => ({ requestId, key: "cook", path: o
 }
 const hearthEffect = (name = "Previous Hearth-fed") => new Effect({ name, changes: [],
   duration: { seconds: 321, startTime: 123 }, flags: { [scope]: { hearthFed: true, preserved: "original" } } });
-const effectState = doc => doc.effects.map(effect => effect.toObject());
+const effectState = doc => doc.effects.map(effect => effect.toObject()).sort((a, b) => a._id.localeCompare(b._id));
 
 // A later diner fails after earlier replacements completed. Preserve exact
 // previous effects (IDs, duration, flags) and both actors' temporary HP.
