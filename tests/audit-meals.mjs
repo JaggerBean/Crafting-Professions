@@ -331,4 +331,44 @@ const request = (owner, diners, requestId) => ({ requestId, key: "cook", path: o
   assert.equal(await abilities.handleMealAbilityRequest(owner, duplicate, player), null);
   assert.equal(await abilities.handleMealAbilityRequest(owner, { ...changed, requestId: "bad.id" }, player), null);
 }
+{
+  const owner = guardedActor(); const other = guardedActor(); other.isOwner = false;
+  connectTransport(owner);
+  foundry.applications = { api: { DialogV2: { wait: async data => {
+    assert.ok(data.content.includes(`value="${other.id}"`), "player picker includes other owners' characters");
+    return [owner.id, other.id];
+  } } } };
+  game.user = player;
+  assert.equal((await abilities.useAbility(owner, "cook")).success, true);
+  game.user = gm;
+  const before = rolls;
+  await abilities.handleMealAbilityRequest(owner, request(owner, [other], "alreadyUsed"), player);
+  assert.equal(rolls, before); assert.match(owner.getFlag(scope, "mealAbilityResponses.alreadyUsed.error"), /has used/);
+}
+{
+  const owner = guardedActor(); const other = guardedActor(); other.isOwner = false;
+  other.failCreate = true;
+  const data = { ...request(owner, [owner, other], "partialFailure"), effect: "emptyPot", dc: -100, amount: 999 };
+  const before = rolls;
+  await abilities.handleMealAbilityRequest(owner, data, player);
+  assert.match(owner.getFlag(scope, "mealAbilityResponses.partialFailure.error"), /create failed/);
+  assert.equal(owner.getFlag(scope, "professions.cook.abilityUsed"), true);
+  assert.equal(owner.system.attributes.exhaustion, 2, "injected effect data ignored");
+  await abilities.handleMealAbilityRequest(owner, data, player);
+  assert.equal(rolls, before + 1, "failed request cannot repeat partial benefits");
+  assert.equal(owner.effects.length, 1); assert.equal(other.effects.length, 0);
+}
+{
+  const owner = guardedActor(); const other = guardedActor(); other.isOwner = false;
+  const data = request(owner, [other], "reservationFailure");
+  const setFlag = gm.setFlag;
+  gm.setFlag = async () => { throw new Error("receipt unavailable"); };
+  const before = rolls;
+  try { await assert.rejects(abilities.handleMealAbilityRequest(owner, data, player), /receipt unavailable/); }
+  finally { gm.setFlag = setFlag; }
+  assert.equal(rolls, before); assert.equal(other.effects.length, 0, "receipt reservation failure grants no benefits");
+  await gm.setFlag(scope, `mealAbilityReceipts.${owner.id}.${data.requestId}`, { requestId: data.requestId, sender: player.id, status: "pending" });
+  await abilities.handleMealAbilityRequest(owner, data, player);
+  assert.equal(rolls, before); assert.match(owner.getFlag(scope, `mealAbilityResponses.${data.requestId}.error`), /already started/);
+}
 console.log("audit-meals: serving recovery, save expiry, talents, pricing, authenticated party feeding, authority checks and replay protection passed");
