@@ -240,7 +240,7 @@ assert.equal((await craftLib.experiment(ally, "blacksmith", ["Copper Ingot"])).m
 // Recipe scrolls.
 const scroll = await craftLib.makeScroll(handaxe.id === found.learned.id ? smithing.find(row => row.output === "Spear").id : handaxe.id);
 assert.match(scroll.name, /^Recipe: /);
-assert.equal(scroll.system.price.value, 10, "Tier 1 scroll: 2 gp (campaign price)");
+assert.equal(scroll.system.price.value, 2, "Tier 1 scroll: 2 gp (campaign price)");
 const [carried] = await ally.createEmbeddedDocuments("Item", [scroll.toObject()]);
 await assert.rejects(craftLib.learnFromScroll(carried), /Only a Blacksmith/);
 const [mine] = await smith.createEmbeddedDocuments("Item", [scroll.toObject()]);
