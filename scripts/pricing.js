@@ -8,7 +8,7 @@
 import { MODULE_ID, CRAFTING_PROFESSIONS } from "./professions.js";
 import { professionRecipes, findRecipe } from "./recipes.js";
 import { contacts, contracts } from "./contacts.js";
-import { RARE_BANDS, spreadInBand, recipeCosts } from "../../gathering-professions/scripts/pricing.js";
+import { RARE_BANDS, spreadInBand, recipeCosts, approvedPrice, tidyPrice, priceInGp as gpOf } from "../../gathering-professions/scripts/pricing.js";
 
 export const SCROLL_PRICE = Object.freeze([2, 5, 15, 40, 100]);
 export const CRAFT_MARGIN = 1.25;
@@ -29,7 +29,7 @@ export async function craftingPrices(prices, { bookPrice, priceInGp, campaignPri
     return book && priceInGp(book) ? priceInGp(campaignPrice(book)) : null;
   };
   const crafting = Object.entries(CRAFTING_PROFESSIONS).filter(([, profession]) => profession.kind !== "bounty");
-  const outputs = new Set(crafting.flatMap(([key]) => professionRecipes(key, { includeDisabled: true }).map(row => row.output)));
+  const outputs = new Set(crafting.flatMap(([key]) => professionRecipes(key).map(row => row.output)));
   // Standard items: tools, bounty gear, bought ingredients.
   const gear = jobBodies().flatMap(body => [...(body.kill?.gear ?? []), ...(body.alive?.gear ?? [])].map(row => row.name));
   const standard = new Set([...Object.values(CRAFTING_PROFESSIONS).map(profession => profession.tool?.name).filter(Boolean), ...gear, ...BOUGHT]);
@@ -40,15 +40,21 @@ export async function craftingPrices(prices, { bookPrice, priceInGp, campaignPri
   }
   // Crafted goods, from ingredient costs.
   const known = new Map([...prices, ...out]);
+  for (const item of items) {
+    const approved = approvedPrice(item);
+    if (approved !== null) known.set(item.name, approved);
+    else if (!known.has(item.name) && outputs.has(item.name)) known.set(item.name, priceInGp(item.system?.price));
+  }
   for (const [key, profession] of crafting) {
-    const rows = professionRecipes(key, { includeDisabled: true }).map(row => ({ output: row.output, quantity: row.quantity, inputs: row.inputs }));
+    const rows = professionRecipes(key).map(row => ({ output: row.output, quantity: row.quantity, inputs: row.inputs }));
     const dishes = profession.kind === "cooking";
     const costs = recipeCosts(rows, known, dishes ? DISH_MARGIN : CRAFT_MARGIN);
     for (const [name, cost] of costs) {
-      const book = dishes ? null : await halfBook(name);
-      const floor = prices.get(name) ?? 0;
-      const value = book !== null ? Math.max(book, cost) : dishes ? cost : Math.max(floor, cost * DISH_MARGIN / CRAFT_MARGIN);
-      out.set(name, Math.max(value, floor));
+      // Ammunition's PHB price is a bundle price, not the price of one arrow.
+      const book = dishes || approvedPrice(byName(name)) !== null || ["Arrows", "Bolts"].includes(name) ? null : await halfBook(name);
+      const floor = known.get(name) ?? 0;
+      const value = Math.max(book ?? 0, cost, floor);
+      out.set(name, gpOf(tidyPrice(value)));
       known.set(name, out.get(name));
     }
   }
