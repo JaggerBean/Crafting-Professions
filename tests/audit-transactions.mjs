@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 const CP = "crafting-professions";
 const GP = "gathering-professions";
+class DataModelValidationError extends Error {}
 let nextId = 1;
 const settings = new Map();
 const get = (object, path) => path.split(".").reduce((value, key) => value?.[key], object);
@@ -40,7 +41,8 @@ class Document {
     return this.update({ [`flags.${scope}.${parts.length ? `${parts.join(".")}.` : ""}-=${last}`]: null });
   }
   async update(changes) {
-    if (this.rejectUpdate?.(changes)) throw new Error("injected Actor update failure");
+    if (this.rejectUpdate?.(changes)) throw this.validationFailure
+      ? new DataModelValidationError("injected Actor validation failure") : new Error("injected Actor update failure");
     // One update is atomic, including cross-module flags and currency.
     const next = { flags: structuredClone(this.flags), system: structuredClone(this.system) };
     for (const [key, value] of Object.entries(changes)) {
@@ -76,7 +78,8 @@ const actors = [];
 const worldItems = [];
 const rolls = [];
 const messages = [];
-globalThis.foundry = { utils: { getProperty: get, setProperty: set, randomID: () => `id${nextId++}`, escapeHTML: String } };
+globalThis.foundry = { data: { validation: { DataModelValidationError } },
+  utils: { getProperty: get, setProperty: set, randomID: () => `id${nextId++}`, escapeHTML: String } };
 globalThis.ui = { notifications: { info() {} } };
 globalThis.Hooks = { on() {}, once() {}, off() {} };
 globalThis.CONST = { DOCUMENT_OWNERSHIP_LEVELS: { OBSERVER: 2 } };
@@ -228,7 +231,7 @@ assert.equal(uncertain.system.currency.gp, 7);
 assert.equal(uncertain.items.length, 0);
 assert.equal(refining.actorJobs(uncertain)[0].id, uncertainJob.id);
 
-// Rejected reward commits refund exact used gear; persisted commits never refund.
+// Proven validation rejection refunds exact used gear; uncertain commits never refund.
 settings.set(`${CP}.bountyContracts`, { list: [{ id: "gear-cost", tier: 1, town: "Audit town", target: "Audit quarry",
   title: "Gear cost", type: "kill", days: 1, kill: { gold: 8, gear: [{ name: "Audit Gear", quantity: 2, mode: "used", reason: "Spent during the hunt" }] }, finds: [] }] });
 const gearRow = recipes.findRecipe("bountyhunter:contract.gear-cost:kill");
@@ -237,6 +240,7 @@ for (const quantity of [2, 4]) {
   const owner = actor();
   await owner.createEmbeddedDocuments("Item", [{ name: "Audit Gear", type: "loot", system: { quantity }, flags: { audit: { provenance: "original" } } }]);
   owner.rejectUpdate = isQueueCommit;
+  owner.validationFailure = true;
   successful();
   await assert.rejects(craft.craft(owner, gearRow.id), /injected Actor/);
   assert.equal(refining.inventoryCount(owner, "Audit Gear"), quantity);
@@ -269,13 +273,35 @@ const changeGear = changedGear.update.bind(changedGear);
 changedGear.update = async changes => {
   if (isQueueCommit(changes)) {
     changedGear.items[0].system.quantity = 1;
-    throw new Error("injected rejected reward and external gear change");
+    throw new DataModelValidationError("injected rejected reward and external gear change");
   }
   return changeGear(changes);
 };
 successful();
 await assert.rejects(craft.craft(changedGear, gearRow.id), /Gear rollback needs GM reconciliation/);
 assert.equal(refining.inventoryCount(changedGear, "Audit Gear"), 1, "Rollback must not overwrite another inventory change");
+
+// Server commits but client cache stays unchanged when the acknowledgement is lost.
+const staleGear = actor();
+await staleGear.createEmbeddedDocuments("Item", [{ name: "Audit Gear", type: "loot", system: { quantity: 4 } }]);
+const staleUpdate = staleGear.update.bind(staleGear);
+let serverFlags;
+staleGear.update = async changes => {
+  const before = structuredClone(staleGear.flags);
+  const result = await staleUpdate(changes);
+  if (isQueueCommit(changes)) {
+    serverFlags = structuredClone(staleGear.flags);
+    staleGear.flags = before;
+    throw new Error("injected stale-cache lost acknowledgement");
+  }
+  return result;
+};
+successful();
+await assert.rejects(craft.craft(staleGear, gearRow.id), /Reward outcome needs GM reconciliation/);
+assert.equal(refining.inventoryCount(staleGear, "Audit Gear"), 2, "Unchanged cache is not proof that costs may be refunded");
+assert.equal(state.xpOf(staleGear, "bountyhunter"), 0, "Client cache intentionally remains stale");
+assert.equal(serverFlags[CP].professions.bountyhunter.xp, 5);
+assert.equal(Object.keys(serverFlags[GP].refiningJobs).length, 1);
 settings.delete(`${CP}.bountyContracts`);
 
 // Persist the item receipt before removing a job, then consume or transfer the reward.
