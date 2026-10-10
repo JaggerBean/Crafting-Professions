@@ -301,6 +301,7 @@ async function huntUnlocked(actor, row) {
     if (mode === "risk" && degree.id === "failed") amount = quantity;
     if (amount) lost.push([name, amount]);
   });
+  const consumed = success ? consumedGearSnapshot(actor, lost) : [];
   for (const [name, amount] of lost) await gp().removeFromInventory(actor, name, amount);
   let gold = 0;
   let find = null;
@@ -319,8 +320,25 @@ async function huntUnlocked(actor, row) {
     const data = find ? (() => { const copy = find.toObject(); delete copy._id; delete copy.folder; delete copy.ownership; delete copy._stats; return copy; })() : null;
     const minutes = rules.timed ? Math.max(0, Number(row.minutes) || 0) : 0;
     const progress = bountyProgress(actor, row, rules.tierXp[check.tier - 1], rules);
-    const record = await gp().queueJob(actor, { name: row.output, img: data?.img ?? row.groupImg, quantity: 1, gold, data,
-      ready: (game.time?.worldTime ?? 0) + minutes * 60, recipe: row.id, minutes }, { updates: progress.updates, deliver: !minutes });
+    const rewardState = () => JSON.stringify({ jobs: actor.getFlag("gathering-professions", "refiningJobs") ?? {},
+      progress: actorProfessions(actor)[row.profession], completed: actor.getFlag(MODULE_ID, "completed") ?? [],
+      gold: actor.system?.currency?.gp ?? 0 });
+    const beforeCommit = rewardState();
+    let record;
+    try {
+      record = await gp().queueJob(actor, { name: row.output, img: data?.img ?? row.groupImg, quantity: 1, gold, data,
+        ready: (game.time?.worldTime ?? 0) + minutes * 60, recipe: row.id, minutes }, { updates: progress.updates, deliver: !minutes });
+    } catch (error) {
+      // Read flags again after the rejection: a committed reward (including a
+      // lost acknowledgement) must never also refund its ingredient cost.
+      if (rewardState() === beforeCommit && consumed.length) {
+        try { await restoreConsumedGear(actor, consumed); }
+        catch (rollbackError) {
+          throw new Error(`${error.message} Gear rollback needs GM reconciliation: ${rollbackError.message}`, { cause: error });
+        }
+      }
+      throw error;
+    }
     job = minutes ? record : null;
     await progress.notify();
     if (askGm) {
@@ -339,6 +357,43 @@ async function huntUnlocked(actor, row) {
   try { await roll.toMessage({ speaker: ChatMessage.getSpeaker({ actor }), flavor }); }
   catch (error) { console.error(`${MODULE_ID}: could not post the bounty roll`, error); }
   return { degree: degree.id, gold, find: find?.name ?? null, askGm, lost, job };
+}
+
+/** Snapshot only the stacks this action will consume, in removal order. */
+function consumedGearSnapshot(actor, lost) {
+  const snapshot = [];
+  for (const [name, amount] of lost) {
+    let left = amount;
+    for (const item of Array.from(actor.items).filter(entry => entry.name === name)) {
+      if (left <= 0) break;
+      const quantity = Math.max(0, Number(item.system?.quantity) || 0);
+      const spent = Math.min(left, quantity);
+      if (spent) snapshot.push({ id: item.id, data: item.toObject(), quantity, spent });
+      left -= spent;
+    }
+  }
+  return snapshot;
+}
+
+/** Restore costs only when every affected stack still matches our removal. */
+async function restoreConsumedGear(actor, snapshot) {
+  const updates = [], creates = [];
+  for (const entry of snapshot) {
+    const item = Array.from(actor.items).find(current => current.id === entry.id);
+    const remaining = entry.quantity - entry.spent;
+    if (remaining ? !item || Number(item.system?.quantity) !== remaining : Boolean(item)) {
+      throw new Error(`${entry.data.name} changed after consumption; no automatic refund was attempted.`);
+    }
+    if (item) updates.push({ _id: item.id, "system.quantity": entry.quantity });
+    else {
+      const data = structuredClone(entry.data);
+      delete data._id;
+      foundry.utils.setProperty(data, "system.quantity", entry.quantity);
+      creates.push(data);
+    }
+  }
+  if (updates.length) await actor.updateEmbeddedDocuments("Item", updates);
+  if (creates.length) await actor.createEmbeddedDocuments("Item", creates);
 }
 
 /** Stage progression for the same Actor update that persists bounty rewards. */
