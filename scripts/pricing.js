@@ -58,7 +58,8 @@ export async function craftingPrices(prices, { bookPrice, priceInGp, campaignPri
   const groups = new Map();
   for (const [name, tier] of findTier) {
     if (prices.has(name) || out.has(name) || !byName(name)) continue;
-    (groups.get(tier) ?? groups.set(tier, []).get(tier)).push({ key: name, old: priceInGp(byName(name).system?.price) });
+    const basis = Number(byName(name).getFlag?.("gathering-professions", "campaignPrice")?.basis);
+    (groups.get(tier) ?? groups.set(tier, []).get(tier)).push({ key: name, old: Number.isFinite(basis) ? basis : priceInGp(byName(name).system?.price) });
   }
   for (const [tier, members] of groups) for (const [name, gp] of spreadInBand(members, RARE_BANDS[tier - 1])) out.set(name, gp);
   // Recipe scrolls.
