@@ -94,8 +94,10 @@ export async function forget(actor, id, rules = craftingRules()) {
   if (!game.user.isGM) throw new Error("Only the GM may remove recipes.");
   const targets = rules.knowledgeMode === "party" ? Array.from(game.actors ?? []).filter(isPartyActor) : [actor].filter(Boolean);
   for (const target of targets) {
-    const current = target.getFlag(MODULE_ID, "known") ?? [];
-    if (current.includes(id)) await target.setFlag(MODULE_ID, "known", current.filter(entry => entry !== id));
+    await runActorAction(target, async () => {
+      const current = target.getFlag(MODULE_ID, "known") ?? [];
+      if (current.includes(id)) await target.setFlag(MODULE_ID, "known", current.filter(entry => entry !== id));
+    });
   }
 }
 
@@ -121,7 +123,11 @@ async function chooseProfessionUnlocked(actor, key, { path }) {
 }
 
 /** GM: remove a crafting profession (XP and known recipes are kept in case it returns). */
-export async function removeProfession(actor, key) {
+export function removeProfession(actor, key) {
+  return runActorAction(actor, () => removeProfessionUnlocked(actor, key));
+}
+
+async function removeProfessionUnlocked(actor, key) {
   if (!game.user.isGM) throw new Error("Only the GM may remove a crafting profession.");
   const current = actorProfessions(actor);
   if (!current[key]) return;
@@ -159,7 +165,11 @@ export async function addXp(actor, key, amount, rules = craftingRules()) {
 }
 
 /** GM: set a rank directly (promote or demote). */
-export async function setRank(actor, key, rank) {
+export function setRank(actor, key, rank) {
+  return runActorAction(actor, () => setRankUnlocked(actor, key, rank));
+}
+
+async function setRankUnlocked(actor, key, rank) {
   if (!game.user.isGM) throw new Error("Only the GM may change crafting ranks.");
   const value = Number(rank);
   if (!Number.isInteger(value) || value < 1 || value > 5) throw new Error("Rank must be 1 to 5.");
@@ -168,7 +178,11 @@ export async function setRank(actor, key, rank) {
 }
 
 /** GM: set XP directly. */
-export async function setXp(actor, key, xp) {
+export function setXp(actor, key, xp) {
+  return runActorAction(actor, () => setXpUnlocked(actor, key, xp));
+}
+
+async function setXpUnlocked(actor, key, xp) {
   if (!game.user.isGM) throw new Error("Only the GM may change crafting XP.");
   const value = Number(xp);
   if (!Number.isInteger(value) || value < 0) throw new Error("XP must be a whole number of 0 or more.");
@@ -186,7 +200,11 @@ export const talentsOf = (actor, key) => [...(actorProfessions(actor)[key]?.tale
 export const talentSlots = (actor, key) => Math.max(0, rankOf(actor, key) - talentsOf(actor, key).length);
 
 /** GM: switch between the standard and Wanderer ability. */
-export async function setPath(actor, key, path) {
+export function setPath(actor, key, path) {
+  return runActorAction(actor, () => setPathUnlocked(actor, key, path));
+}
+
+async function setPathUnlocked(actor, key, path) {
   if (!game.user.isGM) throw new Error("Only the GM may change the ability.");
   if (!["standard", "wanderer"].includes(path)) throw new Error("Choose the standard or the Wanderer ability.");
   if (!hasProfession(actor, key)) return;
@@ -209,7 +227,11 @@ async function chooseTalentUnlocked(actor, key, talentId) {
 }
 
 /** GM: remove a talent (frees its slot). */
-export async function removeTalent(actor, key, talentId) {
+export function removeTalent(actor, key, talentId) {
+  return runActorAction(actor, () => removeTalentUnlocked(actor, key, talentId));
+}
+
+async function removeTalentUnlocked(actor, key, talentId) {
   if (!game.user.isGM) throw new Error("Only the GM may remove talents.");
   await actor.setFlag(MODULE_ID, `professions.${key}.talents`, talentsOf(actor, key).filter(id => id !== talentId));
 }
