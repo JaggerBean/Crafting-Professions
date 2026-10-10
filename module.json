@@ -2,7 +2,7 @@
   "id": "crafting-professions",
   "title": "Crafting Professions",
   "description": "Crafting and unique professions for Gathering Professions: Blacksmith (recipes, Masterwork, perks) and Bounty Hunter (contracts, contacts, gold, rare finds), with ranks, abilities, talents, and recipes learned by scroll, experiment, asking around, or GM grant.",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "authors": [
     {
       "name": "JaggerBean"
@@ -24,7 +24,7 @@
         "id": "gathering-professions",
         "type": "module",
         "compatibility": {
-          "minimum": "0.32.0"
+          "minimum": "0.33.0"
         }
       }
     ],
