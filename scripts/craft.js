@@ -329,13 +329,19 @@ async function huntUnlocked(actor, row) {
       record = await gp().queueJob(actor, { name: row.output, img: data?.img ?? row.groupImg, quantity: 1, gold, data,
         ready: (game.time?.worldTime ?? 0) + minutes * 60, recipe: row.id, minutes }, { updates: progress.updates, deliver: !minutes });
     } catch (error) {
-      // Read flags again after the rejection: a committed reward (including a
-      // lost acknowledgement) must never also refund its ingredient cost.
-      if (rewardState() === beforeCommit && consumed.length) {
+      // Cached flags cannot prove that a rejected server acknowledgement did
+      // not commit. Only a pre-update validation failure permits a refund;
+      // changed reward state remains an additional veto (e.g. delivery failed).
+      const ValidationError = foundry.data?.validation?.DataModelValidationError;
+      const provenAbsent = typeof ValidationError === "function" && error instanceof ValidationError;
+      if (provenAbsent && rewardState() === beforeCommit && consumed.length) {
         try { await restoreConsumedGear(actor, consumed); }
         catch (rollbackError) {
           throw new Error(`${error.message} Gear rollback needs GM reconciliation: ${rollbackError.message}`, { cause: error });
         }
+      }
+      if (!provenAbsent && consumed.length) {
+        throw new Error(`${error.message} Reward outcome needs GM reconciliation; consumed gear was not refunded.`, { cause: error });
       }
       throw error;
     }

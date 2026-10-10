@@ -533,6 +533,11 @@ await assert.rejects(refining.deliverDueJobs(reviewActor), /injected/);
 assert.equal(reviewActor.system.currency.gp, 7);
 assert.ok(refining.actorJobs(reviewActor).some(job => job.id === receipt.id), "A failed delivery retains its job");
 reviewActor.createEmbeddedDocuments = createReviewItems;
+await assert.rejects(refining.deliverDueJobs(reviewActor), /GM reconciliation/);
+assert.equal(refining.actorJobs(reviewActor).find(job => job.id === receipt.id).itemDeliveryStarted, true);
+assert.equal(reviewActor.items.filter(item => item.getFlag("gathering-professions", "deliveryJob") === receipt.id).length, 0);
+// This mock rejected before creating anything: GM has proven no delivery.
+await reviewActor.update({ [`flags.gathering-professions.refiningJobs.${receipt.id}.itemDeliveryStarted`]: false });
 await Promise.all([refining.deliverDueJobs(reviewActor), refining.deliverDueJobs(reviewActor)]);
 assert.equal(reviewActor.system.currency.gp, 7, "Retry does not repeat a partially delivered gold reward");
 assert.equal(reviewActor.items.filter(item => item.name === "Delivery Test").length, 1, "Concurrent collection delivers once");
