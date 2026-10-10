@@ -114,11 +114,15 @@ function skillTotal(actor, skill) {
  */
 export async function useAbility(actor, key, options = {}) {
   const ability = readyAbility(actor, key);
-  if (!game.user.isGM && isMealAbility(ability)) {
+  if (isMealAbility(ability)) {
     const diners = options.items ?? await chooseDiners(actor, ability);
     if (!diners?.length) return null;
-    validatePartyDiners(actor, ability, diners);
-    return requestMealAbility(actor, key, diners);
+    if (!game.user.isGM) {
+      validatePartyDiners(actor, ability, diners);
+      return requestMealAbility(actor, key, diners);
+    }
+    validateDiners(ability, diners);
+    return runPartyAction(actor, diners, () => useAbilityUnlocked(actor, key, { ...options, items: diners }));
   }
   return game.modules.get(GP).api.recipes.runActorAction(actor, () => useAbilityUnlocked(actor, key, options));
 }
@@ -154,9 +158,25 @@ async function useAbilityUnlocked(actor, key, { items = null, quarry = null } = 
   const roll = await game.modules.get(GP).api.recipes.rollProfessionCheck(actor,
     { modifier, formula: `1d20 + ${modifier} + 1d${die}` }, { skill: ability.skill });
   const success = roll.total >= ability.dc;
+  const previousUsed = actorProfessions(actor)[key]?.abilityUsed;
   await actor.setFlag(MODULE_ID, `professions.${key}.abilityUsed`, true);
   let lines = [];
-  if (success && mealAbility) lines = await applyMealAbility(ability, chosen);
+  if (success && mealAbility) {
+    try { lines = await applyMealAbilityUnlocked(ability, chosen); }
+    catch (error) {
+      if (error.mealRollbackComplete) {
+        try {
+          if (previousUsed === undefined) await actor.unsetFlag(MODULE_ID, `professions.${key}.abilityUsed`);
+          else await actor.setFlag(MODULE_ID, `professions.${key}.abilityUsed`, previousUsed);
+        } catch (recoveryError) {
+          // A failed readiness restore must never permit an automatic retry.
+          await actor.setFlag(MODULE_ID, `professions.${key}.abilityUsed`, true).catch(() => {});
+          throw new Error(`Meal effects were restored, but ability readiness recovery failed. GM reconciliation required before retrying: ${recoveryError.message}`);
+        }
+      }
+      throw error;
+    }
+  }
   else if (success && ability.effect !== "intel") {
     if (chosen?.length) lines = ability.effect === "temper" ? await applyTemper(actor, chosen) : await applyColdForge(actor, chosen[0]);
   }
@@ -178,6 +198,19 @@ async function useAbilityUnlocked(actor, key, { items = null, quarry = null } = 
 const isPartyActor = entry => entry?.type === "character" && Boolean(entry.hasPlayerOwner);
 const canFeed = entry => game.user.isGM || entry?.isOwner;
 const worldActor = id => game.actors?.get?.(id) ?? Array.from(game.actors ?? []).find(entry => entry.id === id);
+
+// Acquire every participating actor once, in a deterministic global order.
+// Never acquire the cook first and then nest its diners: two cooks feeding
+// each other would deadlock. All leases remain held through rollback.
+function runPartyAction(actor, diners, task) {
+  const actors = [...new Set([actor, ...diners].filter(Boolean))].sort((a, b) => {
+    const left = String(a.uuid ?? a.id), right = String(b.uuid ?? b.id);
+    return left < right ? -1 : left > right ? 1 : 0;
+  });
+  const lock = index => index === actors.length ? task()
+    : game.modules.get(GP).api.recipes.runActorAction(actors[index], () => lock(index + 1));
+  return lock(0);
+}
 
 function validatePartyDiners(actor, ability, diners) {
   if (!isMealAbility(ability)) throw new Error("Choose a cooking ability.");
@@ -220,7 +253,7 @@ export async function handleMealAbilityRequest(actor, request, sender) {
     || request.diners.some(id => !validRequestId(id)) || new Set(request.diners).size !== request.diners.length) return null;
   // Copy the bounded payload before waiting on the lease; updates cannot replace it in flight.
   const payload = { requestId: request.requestId, key: request.key, path: request.path, diners: [...request.diners] };
-  return game.modules.get(GP).api.recipes.runActorAction(actor, async () => {
+  return runPartyAction(actor, payload.diners.map(worldActor).filter(Boolean), async () => {
     if (!isAbilityAuthority() || !sender.active || !(sender.isGM || actor.testUserPermission?.(sender, "OWNER"))) return null;
     const path = receiptPath(actor, payload.requestId);
     // GM User flags are not writable by players. Keep spent IDs across reloads,
@@ -289,20 +322,69 @@ async function chooseDiners(actor, ability) {
 /** Hearthcraft: a 24-hour "Hearth-fed" effect. The Empty Pot: remove one level of exhaustion. */
 export async function applyMealAbility(ability, diners) {
   validateDiners(ability, diners);
+  return runPartyAction(null, diners, () => applyMealAbilityUnlocked(ability, diners));
+}
+
+async function applyMealAbilityUnlocked(ability, diners) {
+  validateDiners(ability, diners);
+  const token = foundry.utils.randomID();
+  // Snapshot all targets before the first write. Restore only this ability's
+  // effects and changed attributes; unrelated effects remain untouched.
+  const snapshots = diners.map(diner => ({ diner,
+    effects: Array.from(diner.effects ?? []).filter(effect => effect.getFlag?.(MODULE_ID, "hearthFed"))
+      .map(effect => ({ id: effect.id, data: effect.toObject() })),
+    tempHp: diner.system?.attributes?.hp?.temp,
+    exhaustion: diner.system?.attributes?.exhaustion
+  }));
+  const touched = [];
   const lines = [];
-  for (const diner of diners) {
+  try {
+  for (const snapshot of snapshots) {
+    const { diner } = snapshot;
+    touched.push(snapshot);
     if (ability.effect === "emptyPot") {
       const current = Number(diner.system?.attributes?.exhaustion) || 0;
       if (current > 0) await diner.update({ "system.attributes.exhaustion": current - 1 });
       lines.push(`${diner.name}: ${current > 0 ? `exhaustion ${current} → ${current - 1}` : "well fed (no exhaustion to remove)"}`);
     } else {
-      const old = Array.from(diner.effects ?? []).filter(effect => effect.getFlag?.(MODULE_ID, "hearthFed"));
-      if (old.length) await diner.deleteEmbeddedDocuments("ActiveEffect", old.map(effect => effect.id));
-      await diner.createEmbeddedDocuments("ActiveEffect", [{ name: "Hearth-fed", img: "icons/consumables/food/bowl-stew-brown.webp", changes: [],
+      const created = await diner.createEmbeddedDocuments("ActiveEffect", [{ name: "Hearth-fed", img: "icons/consumables/food/bowl-stew-brown.webp", changes: [],
         duration: { seconds: 86400 }, description: "Advantage on one saving throw against disease, poison, or fatigue within 24 hours (apply when it comes up). Mundane food sickness or mild poison is cured; a magical one is suppressed.",
-        flags: { [MODULE_ID]: { hearthFed: true } } }]);
+        flags: { [MODULE_ID]: { hearthFed: true, mealAbilityTransaction: token } } }]);
+      if (created.length !== 1) throw new Error(`Could not create Hearth-fed for ${diner.name}.`);
+      // Preserve the previous effect until its replacement exists.
+      if (snapshot.effects.length) await diner.deleteEmbeddedDocuments("ActiveEffect", snapshot.effects.map(effect => effect.id));
       lines.push(`${diner.name}: Hearth-fed for 24 hours`);
     }
+  }
+  } catch (error) {
+    const failures = [];
+    for (const snapshot of touched.reverse()) {
+      const { diner } = snapshot;
+      // Attempt every recovery step even if one fails, and every diner even
+      // if another cannot be restored. A rejected write may have taken effect.
+      const attempt = async task => { try { await task(); } catch (failure) { failures.push(`${diner.name}: ${failure.message}`); } };
+      await attempt(async () => {
+        const added = Array.from(diner.effects ?? []).filter(effect => effect.getFlag?.(MODULE_ID, "mealAbilityTransaction") === token);
+        if (added.length) await diner.deleteEmbeddedDocuments("ActiveEffect", added.map(effect => effect.id));
+      });
+      await attempt(async () => {
+        const missing = snapshot.effects.filter(effect => !Array.from(diner.effects ?? []).some(current => current.id === effect.id));
+        if (missing.length) {
+          const restored = await diner.createEmbeddedDocuments("ActiveEffect", missing.map(effect => effect.data), { keepId: true });
+          if (restored.length !== missing.length) throw new Error("Could not restore prior Hearth-fed effects.");
+        }
+      });
+      await attempt(async () => {
+        const changes = {};
+        if (diner.system?.attributes?.hp?.temp !== snapshot.tempHp) changes["system.attributes.hp.temp"] = snapshot.tempHp;
+        if (diner.system?.attributes?.exhaustion !== snapshot.exhaustion) changes["system.attributes.exhaustion"] = snapshot.exhaustion;
+        if (Object.keys(changes).length) await diner.update(changes);
+      });
+    }
+    if (failures.length) throw new Error(`Meal ability failed and rollback was incomplete. Ability remains spent; GM reconciliation required before retrying. ${failures.join("; ")}`);
+    const recovered = new Error(`Meal ability failed: ${error.message}. All diners were restored.`);
+    recovered.mealRollbackComplete = true;
+    throw recovered;
   }
   return lines;
 }
