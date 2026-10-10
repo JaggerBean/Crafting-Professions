@@ -5,7 +5,7 @@ import { MODULE_ID, GP_ID, CRAFTING_PROFESSIONS } from "./professions.js";
 import { craftingRules, saveCraftingRules } from "./rules.js";
 import { professionRecipes, prepareItems, findRecipe } from "./recipes.js";
 import { actorProfessions, chooseProfession, removeProfession, setRank, setXp, addXp, learn, forget, knows, knownIds, rankOf, setPath, chooseTalent, removeTalent } from "./state.js";
-import { useAbility, longRest, injectTalents, talentsForRoll } from "./abilities.js";
+import { useAbility, longRest, injectTalents, talentsForRoll, registerAbilityHooks } from "./abilities.js";
 import { eatMeal, mealOf, mealList, saveMeals, resetMeals, refreshCookedMeals } from "./meals.js";
 import { registerAskAround, requestAskAround, handleAskRequest, askOptions } from "./askaround.js";
 import { hunt, makeContactScroll, makeWantedNotice } from "./craft.js";
@@ -44,6 +44,7 @@ function setUp(gpApi) {
   gpApi.pricing?.registerContributor?.(craftingPrices);
   registerMenu(gpApi);
   registerAskAround(isActiveGM);
+  registerAbilityHooks();
   void gpApi.hub?.registerSection(HUB_SECTION);
   void gpApi.hub?.registerSection(COOKING_HUB_SECTION);
   void gpApi.hub?.registerSection(BOUNTY_HUB_SECTION);

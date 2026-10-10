@@ -112,16 +112,30 @@ function skillTotal(actor, skill) {
  * profession die vs the ability's DC. On a success, apply its effect to the
  * items chosen (`items` may be passed in to skip the picker).
  */
-export function useAbility(actor, key, options = {}) {
+export async function useAbility(actor, key, options = {}) {
+  const ability = readyAbility(actor, key);
+  if (!game.user.isGM && isMealAbility(ability)) {
+    const diners = options.items ?? await chooseDiners(actor, ability);
+    if (!diners?.length) return null;
+    validatePartyDiners(actor, ability, diners);
+    return requestMealAbility(actor, key, diners);
+  }
   return game.modules.get(GP).api.recipes.runActorAction(actor, () => useAbilityUnlocked(actor, key, options));
 }
 
-async function useAbilityUnlocked(actor, key, { items = null, quarry = null } = {}) {
+const isMealAbility = ability => ["hearthcraft", "emptyPot"].includes(ability?.effect);
+
+function readyAbility(actor, key) {
   if (!actor || !(game.user.isGM || actor.isOwner)) throw new Error("Choose a character you own.");
   if (!hasProfession(actor, key)) throw new Error(`${actor.name} is not a ${CRAFTING_PROFESSIONS[key]?.label ?? key}.`);
   const ability = abilityFor(actor, key);
   if (!ability) throw new Error("This profession has no ability.");
   if (abilityUsed(actor, key)) throw new Error(`${actor.name} has used ${ability.name}; it recharges on a long rest.`);
+  return ability;
+}
+
+async function useAbilityUnlocked(actor, key, { items = null, quarry = null } = {}) {
+  const ability = readyAbility(actor, key);
   // Information abilities (Hunter's Pursuit, Fresh Trail): name the quarry first.
   if (ability.effect === "intel") {
     quarry ??= await askQuarry(ability);
@@ -163,6 +177,92 @@ async function useAbilityUnlocked(actor, key, { items = null, quarry = null } = 
 
 const isPartyActor = entry => entry?.type === "character" && Boolean(entry.hasPlayerOwner);
 const canFeed = entry => game.user.isGM || entry?.isOwner;
+const worldActor = id => game.actors?.get?.(id) ?? Array.from(game.actors ?? []).find(entry => entry.id === id);
+
+function validatePartyDiners(actor, ability, diners) {
+  if (!isMealAbility(ability)) throw new Error("Choose a cooking ability.");
+  if (!Array.isArray(diners) || !diners.length || diners.length > ability.maxItems) throw new Error(`${ability.name} feeds at most ${ability.maxItems}.`);
+  if (new Set(diners.map(entry => entry?.id)).size !== diners.length
+    || diners.some(entry => entry?.documentName !== "Actor" || worldActor(entry.id) !== entry || !isPartyActor(entry))) {
+    throw new Error("Choose distinct party characters from this world.");
+  }
+}
+
+const isAbilityAuthority = () => game.user.isGM && game.users?.activeGM?.id === game.user.id;
+const validRequestId = id => typeof id === "string" && /^[A-Za-z0-9]{1,64}$/.test(id);
+const receiptPath = (actor, requestId) => `mealAbilityReceipts.${actor.id}.${requestId}`;
+const responsePath = requestId => `mealAbilityResponses.${requestId}`;
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+async function requestMealAbility(actor, key, diners) {
+  if (!game.users?.activeGM) throw new Error("An active GM is required to feed the party.");
+  const requestId = foundry.utils.randomID();
+  const request = { requestId, key, path: pathOf(actor, key), diners: diners.map(diner => diner.id) };
+  // Do not hold a player lease while waiting: the GM must acquire that lease.
+  await actor.setFlag(MODULE_ID, "mealAbilityRequest", request);
+  for (let tick = 0; tick < 150; tick++) {
+    const receipt = actor.getFlag(MODULE_ID, responsePath(requestId));
+    if (receipt?.requestId === requestId && receipt.sender === game.user.id && receipt.status !== "pending") {
+      if (receipt.error) throw new Error(receipt.error);
+      return receipt.result;
+    }
+    await sleep(100);
+  }
+  throw new Error("The GM has not answered the meal request yet. It may still complete; check the ability before trying again.");
+}
+
+/** Active GM only. The sender comes from Foundry's updateActor userId, never from request data. */
+export async function handleMealAbilityRequest(actor, request, sender) {
+  if (!isAbilityAuthority() || !sender?.active || !actor?.id || worldActor(actor.id) !== actor
+    || !(sender.isGM || actor.testUserPermission?.(sender, "OWNER")) || !validRequestId(request?.requestId)
+    || request.key !== "cook" || !["standard", "wanderer"].includes(request.path)
+    || !Array.isArray(request.diners) || request.diners.length < 1 || request.diners.length > 6
+    || request.diners.some(id => !validRequestId(id)) || new Set(request.diners).size !== request.diners.length) return null;
+  // Copy the bounded payload before waiting on the lease; updates cannot replace it in flight.
+  const payload = { requestId: request.requestId, key: request.key, path: request.path, diners: [...request.diners] };
+  return game.modules.get(GP).api.recipes.runActorAction(actor, async () => {
+    if (!isAbilityAuthority() || !sender.active || !(sender.isGM || actor.testUserPermission?.(sender, "OWNER"))) return null;
+    const path = receiptPath(actor, payload.requestId);
+    // GM User flags are not writable by players. Keep spent IDs across reloads,
+    // rests, and active-GM changes; actor response flags are only transport.
+    const prior = Array.from(game.users ?? []).filter(user => user.isGM).map(user => user.getFlag?.(MODULE_ID, path)).find(Boolean);
+    if (prior) {
+      if (prior.sender !== sender.id) return null;
+      await actor.setFlag(MODULE_ID, responsePath(payload.requestId), prior.status === "pending"
+        ? { ...prior, status: "error", error: "This meal request was already started. Ask the GM to check its outcome; it will not run again." } : prior);
+      return prior.result ?? null;
+    }
+    let receipt = { requestId: payload.requestId, sender: sender.id, status: "pending" };
+    // Reserve the ID durably before any roll or benefit, including failed attempts.
+    await game.user.setFlag(MODULE_ID, path, receipt);
+    try {
+      const ability = readyAbility(actor, payload.key);
+      if (!isMealAbility(ability) || pathOf(actor, payload.key) !== payload.path) throw new Error("The cooking ability changed. Choose diners again.");
+      const diners = payload.diners.map(worldActor);
+      validatePartyDiners(actor, ability, diners);
+      const result = await useAbilityUnlocked(actor, payload.key, { items: diners });
+      receipt = { ...receipt, status: "complete", result };
+    } catch (error) {
+      receipt = { ...receipt, status: "error", error: error.message || "The meal ability failed. Ask the GM to check its outcome." };
+    }
+    await game.user.setFlag(MODULE_ID, path, receipt);
+    await actor.setFlag(MODULE_ID, responsePath(payload.requestId), receipt);
+    return receipt.result ?? null;
+  });
+}
+
+let abilityHooksRegistered = false;
+export function registerAbilityHooks() {
+  if (abilityHooksRegistered) return;
+  abilityHooksRegistered = true;
+  Hooks.on("updateActor", (actor, changes, _options, userId) => {
+    const request = changes.flags?.[MODULE_ID]?.mealAbilityRequest ?? changes[`flags.${MODULE_ID}.mealAbilityRequest`];
+    if (!request) return;
+    const sender = game.users?.get?.(userId) ?? Array.from(game.users ?? []).find(user => user.id === userId);
+    void handleMealAbilityRequest(actor, request, sender).catch(error => console.error(`${MODULE_ID}: meal ability request failed`, error));
+  });
+  // Never execute flags found on load: only a fresh update has an authenticated sender.
+}
 
 function validateDiners(ability, diners) {
   if (!["hearthcraft", "emptyPot"].includes(ability?.effect)) throw new Error("Choose a cooking ability.");
@@ -173,11 +273,11 @@ function validateDiners(ability, diners) {
 
 /** Ask which party characters eat (up to the ability's limit). */
 async function chooseDiners(actor, ability) {
-  const party = [...new Set([actor, ...Array.from(game.actors ?? []).filter(isPartyActor)])].filter(canFeed);
+  const party = [...new Set([actor, ...Array.from(game.actors ?? []).filter(isPartyActor)])];
   const DialogV2 = foundry.applications.api.DialogV2;
   const picked = await DialogV2.wait({
     window: { title: `${ability.name}: who eats?` }, classes: ["gathering-professions-ui", "gp-dialog"],
-    content: `<div class="cp-picklist">${party.map(entry => `<label class="cp-pick"><input type="checkbox" name="diner" value="${escape(entry.id)}" checked> <img src="${escape(entry.img)}" alt=""> ${escape(entry.name)}</label>`).join("")}</div><p class="hint">Up to ${ability.maxItems}. ${game.user.isGM ? "" : "Only characters you own are listed. Ask the GM to serve other party members."}</p>`,
+    content: `<div class="cp-picklist">${party.map(entry => `<label class="cp-pick"><input type="checkbox" name="diner" value="${escape(entry.id)}" checked> <img src="${escape(entry.img)}" alt=""> ${escape(entry.name)}</label>`).join("")}</div><p class="hint">Up to ${ability.maxItems}. ${game.user.isGM ? "" : "An active GM serves the meal to the selected party members."}</p>`,
     buttons: [{ action: "ok", label: "Serve", default: true, callback: (_event, button) => Array.from(button.form.querySelectorAll('input[name="diner"]:checked')).map(input => input.value) }],
     rejectClose: false
   });
