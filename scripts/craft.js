@@ -2,7 +2,7 @@
 import { MODULE_ID, CRAFTING_PROFESSIONS } from "./professions.js";
 import { craftingRules } from "./rules.js";
 import { findRecipe, professionRecipes, folderPath, learnIdOf } from "./recipes.js";
-import { hasProfession, rankOf, dieOf, knows, knownIds, learn, addXp, completedIds, markCompleted, taskUsesLeft, useTask } from "./state.js";
+import { actorProfessions, xpOf, rankForXp, hasProfession, rankOf, dieOf, knows, knownIds, learn, addXp, completedIds, taskUsesLeft, useTask } from "./state.js";
 import { findContact, findContract, CONTACT_PREFIX, CONTRACT_PREFIX } from "./contacts.js";
 import { applyMasterwork, applyPerk, fittingPerks, isGear, perkList } from "./perks.js";
 import { stampMeal, mealFor } from "./meals.js";
@@ -229,18 +229,25 @@ async function craftUnlocked(actor, id, batch = 1) {
  * don't matter and nothing is used. Otherwise a warm or cold hint.
  */
 export async function experiment(actor, profession, names) {
+  if (!actor) return { learned: null, warm: false, message: "Choose a character first." };
+  return gp().runActorAction(actor, () => experimentUnlocked(actor, profession, names));
+}
+
+async function experimentUnlocked(actor, profession, names) {
   const label = CRAFTING_PROFESSIONS[profession]?.label ?? profession;
   if (!actor) return { learned: null, warm: false, message: "Choose a character first." };
   if (!hasProfession(actor, profession)) return { learned: null, warm: false, message: `Only a ${label} can experiment here.` };
   const chosen = [...new Set(names)];
   if (!chosen.length) return { learned: null, warm: false, message: "Put something in first." };
+  const missing = chosen.filter(name => gp().inventoryCount(actor, name) < 1);
+  if (missing.length) return { learned: null, warm: false, message: `Carry the ingredients first: ${missing.join(", ")}.` };
   const known = knownIds(actor);
   const rank = rankOf(actor, profession);
   const candidates = professionRecipes(profession).filter(row => !known.has(row.id) && row.tier <= rank);
   const same = row => row.inputs.length === chosen.length && row.inputs.every(([name]) => chosen.includes(name));
   const match = candidates.find(same);
   if (match) {
-    await learn(actor, [match.id]);
+    await learn(actor, [match.id], { locked: true });
     return { learned: match, warm: true, message: `Discovered: ${match.output}! ${actor.name} can now make it.` };
   }
   const warm = candidates.some(row => chosen.every(name => row.inputs.some(([input]) => input === name)));
@@ -306,18 +313,16 @@ async function huntUnlocked(actor, row) {
       find = name ? Array.from(game.items ?? []).find(item => item.name === name) ?? null : null;
       askGm = !find;
     }
-    await addXp(actor, row.profession, rules.tierXp[check.tier - 1], rules);
-    if (!row.repeatable) await markCompleted(actor, row.jobId);
   }
   let job = null;
   if (success) {
     const data = find ? (() => { const copy = find.toObject(); delete copy._id; delete copy.folder; delete copy.ownership; delete copy._stats; return copy; })() : null;
     const minutes = rules.timed ? Math.max(0, Number(row.minutes) || 0) : 0;
-    if (minutes) job = await gp().queueJob(actor, { name: row.output, img: data?.img ?? row.groupImg, quantity: 1, gold, data, ready: (game.time?.worldTime ?? 0) + minutes * 60, recipe: row.id, minutes });
-    else {
-      await gp().addGold(actor, gold);
-      if (data) await gp().addToInventory(actor, data, 1);
-    }
+    const progress = bountyProgress(actor, row, rules.tierXp[check.tier - 1], rules);
+    const record = await gp().queueJob(actor, { name: row.output, img: data?.img ?? row.groupImg, quantity: 1, gold, data,
+      ready: (game.time?.worldTime ?? 0) + minutes * 60, recipe: row.id, minutes }, { updates: progress.updates, deliver: !minutes });
+    job = minutes ? record : null;
+    await progress.notify();
     if (askGm) {
       const gms = Array.from(game.users ?? []).filter(user => user.isGM).map(user => user.id);
       if (gms.length) await ChatMessage.create({ whisper: gms, content: `<p><strong>${escape(actor.name)}</strong> found something valuable on the quarry of <strong>${escape(row.output)}</strong>. Give them a rare find of your choice.</p>` });
@@ -334,6 +339,31 @@ async function huntUnlocked(actor, row) {
   try { await roll.toMessage({ speaker: ChatMessage.getSpeaker({ actor }), flavor }); }
   catch (error) { console.error(`${MODULE_ID}: could not post the bounty roll`, error); }
   return { degree: degree.id, gold, find: find?.name ?? null, askGm, lost, job };
+}
+
+/** Stage progression for the same Actor update that persists bounty rewards. */
+function bountyProgress(actor, row, amount, rules) {
+  const key = row.profession;
+  const profession = CRAFTING_PROFESSIONS[key];
+  const entry = { ...actorProfessions(actor)[key], xp: xpOf(actor, key) + amount };
+  const oldRank = rankOf(actor, key);
+  if (rules.rankUpMode === "auto") entry.rank = Math.max(oldRank, rankForXp(entry.xp, rules));
+  const ready = rules.rankUpMode === "gm" && oldRank < 5 && entry.xp >= rules.rankXp[oldRank] ? oldRank + 1 : null;
+  const announceReady = ready && entry.readyNotified !== ready;
+  if (announceReady) entry.readyNotified = ready;
+  const updates = { [`flags.${MODULE_ID}.professions.${key}`]: entry };
+  if (!row.repeatable) updates[`flags.${MODULE_ID}.completed`] = [...new Set([...(actor.getFlag(MODULE_ID, "completed") ?? []), row.jobId])];
+  return { updates, async notify() {
+    // Notifications must not turn a committed reward into a failed action.
+    try {
+      if (entry.rank > oldRank) ui.notifications.info(`${actor.name} reached ${profession.label} rank ${entry.rank}: ${profession.ranks[entry.rank - 1].title}!`);
+      if (announceReady) {
+        const gms = Array.from(game.users ?? []).filter(user => user.isGM).map(user => user.id);
+        const goal = profession.ranks[ready - 2]?.goal ?? "";
+        if (gms.length) await ChatMessage.create({ whisper: gms, content: `<p><strong>${escape(actor.name)}</strong> has the XP for <strong>${escape(profession.label)} rank ${ready}</strong>${goal ? `. Story goal: <em>${escape(goal)}</em>` : ""}. Promote them in their Professions menu when it is met.</p>` });
+      }
+    } catch (error) { console.error(`${MODULE_ID}: could not announce bounty progress`, error); }
+  } };
 }
 
 /* ---------------------------------------------------------------------- */
@@ -463,7 +493,7 @@ async function learnFromScrollUnlocked(item) {
   const problem = scrollProblem(actor, item);
   if (problem === "Already known") throw new Error(`${actor.name} already knows ${teaches.label.replace(/^to /, "how to ")}.`);
   if (problem) throw new Error(`${problem}.`);
-  await learn(actor, teaches.ids);
+  await learn(actor, teaches.ids, { locked: true });
   const quantity = Math.max(0, Number(item.system?.quantity) || 1);
   if (quantity > 1) await item.update({ "system.quantity": quantity - 1 });
   else await item.delete();
