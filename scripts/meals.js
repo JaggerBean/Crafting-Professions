@@ -140,6 +140,10 @@ export function stampMeal(data, mealName, { exquisite = false, valueFactor = 2 }
   if (!meal) return data;
   if (exquisite) {
     meal = exquisiteMeal(meal);
+    const pricing = foundry.utils.getProperty(data, "flags.gathering-professions.campaignPrice") ?? {};
+    foundry.utils.setProperty(data, "flags.gathering-professions.campaignPrice", {
+      ...pricing, baseName: mealName, valueMultiplier: (Number(pricing.valueMultiplier) || 1) * valueFactor
+    });
     data.name = `Exquisite ${data.name}`;
     const price = Number(foundry.utils.getProperty(data, "system.price.value"));
     if (Number.isFinite(price)) foundry.utils.setProperty(data, "system.price.value", Math.round(price * valueFactor * 100) / 100);
