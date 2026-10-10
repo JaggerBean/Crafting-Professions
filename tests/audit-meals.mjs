@@ -131,7 +131,7 @@ for (const failure of ["consume", "benefit", "create", "replace"]) {
   await assert.rejects(meals.eatMeal(meal), /no available servings/);
   assert.equal(owner.system.attributes.hp.value, 9);
 }
-function prepareSave(owner, ability, rolls = [{}]) {
+function prepareSave(owner, ability, rolls = [{ _evaluated: true }]) {
   const config = { subject: owner, ability };
   hooks.get("dnd5e.preRollSavingThrowV2")(config);
   hooks.get("dnd5e.postSavingThrowRollConfiguration")(rolls, config);
@@ -144,6 +144,8 @@ function finishSave(owner, ability, rolls) {
   const owner = actor(); await meals.eatMeal(item(owner, advantage));
   finishSave(owner, "con", prepareSave(owner, "con")); assert.equal(owner.effects.length, 1);
   prepareSave(owner, "wis", []); assert.equal(owner.effects.length, 1, "cancelled roll keeps benefit");
+  finishSave(owner, "wis", prepareSave(owner, "wis", [{ _evaluated: false }]));
+  assert.equal(owner.effects.length, 1, "unevaluated roll keeps benefit");
   const roll = prepareSave(owner, "wis"); finishSave(owner, "wis", roll);
   assert.equal(owner.effects.length, 0);
   finishSave(owner, "wis", roll); assert.equal(owner.effects.length, 0, "repeat hook harmless");
@@ -155,6 +157,37 @@ function finishSave(owner, ability, rolls) {
   assert.equal(owner.effects.length, 1, "old roll never removes a replacement meal");
   owner.effects[0].disabled = true; finishSave(owner, "wis", prepareSave(owner, "wis"));
   assert.equal(owner.effects.length, 1, "disabled effects were not used");
+  owner.effects[0].disabled = false; owner.effects[0].duration.remaining = -1;
+  finishSave(owner, "wis", prepareSave(owner, "wis"));
+  assert.equal(owner.effects.length, 1, "expired effects were not used");
+}
+{
+  const owner = actor(); const legacy = new Effect(meals.mealEffectData(advantage, "Tea"));
+  delete legacy.flags[scope].mealSave; owner.effects.push(legacy);
+  finishSave(owner, "wis", prepareSave(owner, "wis"));
+  assert.equal(owner.effects.length, 0, "legacy meal flags expire on matching save");
+}
+{
+  const owner = actor(); const meal = item(owner, heal);
+  const error = console.error; console.error = () => {};
+  const create = ChatMessage.create; ChatMessage.create = async () => { throw new Error("chat failed"); };
+  try { await meals.eatMeal(meal); } finally { ChatMessage.create = create; console.error = error; }
+  assert.equal(owner.system.attributes.hp.value, 9);
+  await assert.rejects(meals.eatMeal(meal), /no longer/);
+}
+{
+  const owner = actor(); const meal = item(owner, speed);
+  owner.failCreate = true;
+  owner.update = async () => { throw new Error("recovery failed"); };
+  // Recovery of timed benefits does not need an Actor update; force refund failure.
+  const update = meal.update;
+  meal.update = async changes => {
+    if (changes["system.quantity"] === 1) throw new Error("refund failed");
+    return update.call(meal, changes);
+  };
+  const error = console.error; console.error = () => {};
+  try { await assert.rejects(meals.eatMeal(meal), /recovery was incomplete/); } finally { console.error = error; }
+  assert.equal(meal.system.quantity, 0); assert.equal(owner.effects.length, 0);
 }
 {
   const owner = actor(); const other = actor(); other.isOwner = false;
@@ -172,6 +205,16 @@ for (const name of ["SavingThrow", "deathSave", "concentration", "attack", "d20T
   abilities.injectTalents({ config: { subject: actor(), ability: "wis", hookNames: [name] } }, {
     querySelector() { throw new Error("save/other roll received talents"); }
   });
+}
+{
+  const owner = actor();
+  owner.flags[scope].professions = { blacksmith: { rank: 1, talents: ["hearty-stomach"] } };
+  let inputs = 0;
+  const element = { querySelector() { inputs++; return null; } };
+  abilities.injectTalents({ config: { subject: owner, ability: "con", hookNames: ["AbilityCheck", "d20Test"] } }, element);
+  assert.equal(inputs, 1, "plain checks still offer fitting talents");
+  abilities.injectTalents({ config: { subject: owner, ability: "con", hookNames: ["AbilityCheck", "SavingThrow"] } }, element);
+  assert.equal(inputs, 1, "save hooks veto check talents");
 }
 {
   const data = { name: "Tea", system: { price: { value: 1 } }, flags: {

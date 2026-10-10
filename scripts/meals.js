@@ -278,7 +278,7 @@ Hooks.on("dnd5e.postSavingThrowRollConfiguration", (rolls, config) => {
   for (const roll of rolls ?? []) mealSaves.set(roll, pendingSaves.get(config) ?? []);
 });
 Hooks.on("dnd5e.rollSavingThrow", (rolls, { subject, ability }) => {
-  const effects = [...new Set((rolls ?? []).flatMap(roll => mealSaves.get(roll) ?? []))];
+  const effects = [...new Set((rolls ?? []).filter(roll => roll._evaluated).flatMap(roll => mealSaves.get(roll) ?? []))];
   const ids = effects.filter(effect => saveAbility(effect) === ability && Array.from(subject.effects ?? []).includes(effect)).map(effect => effect.id);
   if (ids.length && (game.user.isGM || subject.isOwner)) {
     void subject.deleteEmbeddedDocuments("ActiveEffect", ids).catch(error => console.error(`${MODULE_ID}: could not expire meal save`, error));
