@@ -150,6 +150,25 @@ await refining.deliverDueJobs(rejected, queued.job.ready);
 assert.equal(rejected.system.currency.gp, row.gold);
 assert.equal(state.xpOf(rejected, "bountyhunter"), 5);
 
+// Even a lost acknowledgement after a successful commit cannot award XP twice.
+const acknowledgedLate = await hunter();
+const originalUpdate = acknowledgedLate.update.bind(acknowledgedLate);
+let loseAcknowledgement = true;
+acknowledgedLate.update = async changes => {
+  const result = await originalUpdate(changes);
+  if (isQueueCommit(changes) && loseAcknowledgement) {
+    loseAcknowledgement = false;
+    throw new Error("injected lost commit acknowledgement");
+  }
+  return result;
+};
+successful();
+await assert.rejects(craft.craft(acknowledgedLate, row.id), /lost commit acknowledgement/);
+await assert.rejects(craft.craft(acknowledgedLate, row.id), /already done/);
+await refining.deliverDueJobs(acknowledgedLate, refining.actorJobs(acknowledgedLate)[0].ready);
+assert.equal(state.xpOf(acknowledgedLate, "bountyhunter"), 5);
+assert.equal(acknowledgedLate.system.currency.gp, row.gold);
+
 // Immediate-payment failure retains a recoverable job; retries never reroll or award XP again.
 settings.set(`${CP}.rules`, { timed: false, rankUpMode: "auto" });
 const unpaid = await hunter(95);
