@@ -4,6 +4,7 @@
 import { MODULE_ID, CRAFTING_PROFESSIONS } from "./professions.js";
 import { bountyRows, bountyItemNames } from "./contacts.js";
 import { CUSTOM_ITEMS, customItemData } from "./customitems.js";
+import { assertAcyclicRecipes } from "../../gathering-professions/scripts/pricing.js";
 
 const KCTG = "kctg-5e.kctg-dnd5e";
 const PHB = "dnd5e.equipment24";
@@ -156,6 +157,7 @@ export async function createRecipe(fields) {
   requireGM();
   const data = normalizeRecipeFields(fields);
   const row = { id: `${data.profession}:custom-${foundry.utils.randomID()}`, ...data };
+  assertAcyclicRecipes([...allRecipes(), row]);
   await game.settings.set(MODULE_ID, "customRecipes", [...customRecipes(), row]);
   await shareProduct(data.output);
   return row;
@@ -166,6 +168,7 @@ export async function updateRecipe(id, fields) {
   const current = findRecipe(id, { includeDisabled: true });
   if (!current) throw new Error("That recipe no longer exists.");
   const data = normalizeRecipeFields({ ...fields, profession: current.profession });
+  assertAcyclicRecipes(allRecipes().map(row => row.id === id ? { ...row, ...data } : row));
   if (current.custom) await game.settings.set(MODULE_ID, "customRecipes", customRecipes().map(row => (row.id === id ? { ...row, ...data } : row)));
   else {
     const edits = recipeEdits();
