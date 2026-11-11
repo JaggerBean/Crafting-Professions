@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "id": "crafting-professions",
+  "name": "Crafting Professions",
+  "type": "foundry-module",
+  "author": "Jagger",
+  "description": "Crafting and unique professions for Gathering Professions: Blacksmith (recipes, Masterwork, perks) and Bounty Hunter (contracts, contacts, gold, rare finds), with ranks, abilities, talents and recipes. Requires Gathering Professions.",
+  "tags": [
+    "Foundry VTT",
+    "D&D 5e"
+  ]
+}
